@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">MediaVault</string>
+    <string name="home_title">Your media, organized.</string>
+    <string name="home_body">MediaVault will let you import, preview, organize and convert your own photos, videos and audio. This build is Phase 1: it proves the app can reach the shared MediaVault server.</string>
+    <string name="status_loading">Checking the MediaVault server…</string>
+    <string name="status_connected">Backend connected</string>
+    <string name="status_degraded">Backend reachable, database unavailable</string>
+    <string name="status_error">Backend unreachable</string>
+    <string name="status_error_hint">Make sure the backend is running on port 8000. Server: %1$s</string>
+    <string name="label_service">Service</string>
+    <string name="label_version">Version</string>
+    <string name="label_environment">Environment</string>
+    <string name="label_database">Database</string>
+    <string name="db_ok">OK</string>
+    <string name="db_error">Error</string>
+    <string name="action_retry">Check again</string>
+    <string name="footer_legal">MediaVault works only with media you own or are authorized to use.</string>
+</resources>

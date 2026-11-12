@@ -1,0 +1,41 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.keystore
+*.jks
+local.properties
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+coverage/
+playwright-report/
+test-results/
+
+# Android / Gradle
+.gradle/
+build/
+.kotlin/
+captures/
+.idea/
+*.iml
+.cxx/
+.externalNativeBuild/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
