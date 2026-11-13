@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import type { ReactNode } from "react";
 import Link from "next/link";
 
 import { Logo } from "@/components/Logo";
@@ -15,7 +16,9 @@ export const viewport: Viewport = {
   themeColor: "#0B1F3A",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+// Explicit props type (not the generated global LayoutProps) so a bare `tsc --noEmit` works on a
+// fresh clone before `next typegen` has run (MV-009).
+export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
     <html lang="en" className="h-full antialiased">
       <body className="flex min-h-full flex-col">

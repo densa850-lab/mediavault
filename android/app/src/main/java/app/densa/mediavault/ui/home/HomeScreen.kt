@@ -47,14 +47,24 @@ import app.densa.mediavault.ui.theme.MediaVaultTheme
 import app.densa.mediavault.ui.theme.Navy
 
 @Composable
-fun HomeRoute(viewModel: HomeViewModel, serverUrl: String) {
+fun HomeRoute(viewModel: HomeViewModel, serverUrl: String, showErrorReason: Boolean) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    HomeScreen(state = state, serverUrl = serverUrl, onRetry = viewModel::refresh)
+    HomeScreen(
+        state = state,
+        serverUrl = serverUrl,
+        showErrorReason = showErrorReason,
+        onRetry = viewModel::refresh,
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen(state: HomeUiState, serverUrl: String, onRetry: () -> Unit) {
+fun HomeScreen(
+    state: HomeUiState,
+    serverUrl: String,
+    showErrorReason: Boolean = false,
+    onRetry: () -> Unit,
+) {
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
@@ -65,7 +75,7 @@ fun HomeScreen(state: HomeUiState, serverUrl: String, onRetry: () -> Unit) {
                         Text(stringResource(R.string.app_name), fontWeight = FontWeight.SemiBold)
                     }
                 },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = Navy,
                     titleContentColor = Color.White,
                 ),
@@ -86,7 +96,7 @@ fun HomeScreen(state: HomeUiState, serverUrl: String, onRetry: () -> Unit) {
                 fontWeight = FontWeight.Bold,
             )
             Text(stringResource(R.string.home_body), style = MaterialTheme.typography.bodyLarge)
-            StatusCard(state = state, serverUrl = serverUrl, onRetry = onRetry)
+            StatusCard(state = state, serverUrl = serverUrl, showErrorReason = showErrorReason, onRetry = onRetry)
             Text(
                 stringResource(R.string.footer_legal),
                 style = MaterialTheme.typography.bodySmall,
@@ -97,7 +107,12 @@ fun HomeScreen(state: HomeUiState, serverUrl: String, onRetry: () -> Unit) {
 }
 
 @Composable
-private fun StatusCard(state: HomeUiState, serverUrl: String, onRetry: () -> Unit) {
+private fun StatusCard(
+    state: HomeUiState,
+    serverUrl: String,
+    showErrorReason: Boolean,
+    onRetry: () -> Unit,
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -123,10 +138,22 @@ private fun StatusCard(state: HomeUiState, serverUrl: String, onRetry: () -> Uni
             when (state) {
                 is HomeUiState.Connected -> HealthDetails(state.health)
                 is HomeUiState.Degraded -> HealthDetails(state.health)
-                is HomeUiState.Error -> Text(
-                    stringResource(R.string.status_error_hint, serverUrl),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
+                is HomeUiState.Error -> {
+                    Text(
+                        stringResource(R.string.status_error_hint, serverUrl),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    // Debug builds only (MV-010): the raw reason helps developers, but it can
+                    // contain host names, so release builds keep the generic hint.
+                    if (showErrorReason) {
+                        Text(
+                            stringResource(R.string.status_error_reason, state.reason),
+                            modifier = Modifier.testTag("error_reason"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
                 HomeUiState.Loading -> Unit
             }
             if (state != HomeUiState.Loading) {
@@ -191,5 +218,5 @@ private fun HomeConnectedPreview() {
 @Preview(showBackground = true)
 @Composable
 private fun HomeErrorPreview() {
-    MediaVaultTheme { HomeScreen(HomeUiState.Error("Failed to connect"), "http://10.0.2.2:8000/") {} }
+    MediaVaultTheme { HomeScreen(HomeUiState.Error("Failed to connect"), "http://10.0.2.2:8000/", showErrorReason = true) {} }
 }

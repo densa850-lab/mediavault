@@ -326,6 +326,7 @@ dependencies = [
 dev = [
     { name = "httpx2" },
     { name = "pytest" },
+    { name = "python-dotenv" },
     { name = "ruff" },
 ]
 
@@ -345,7 +346,8 @@ requires-dist = [
 dev = [
     { name = "httpx2", specifier = "==2.16.0" },
     { name = "pytest", specifier = "==9.2.0" },
-    { name = "ruff" },
+    { name = "python-dotenv", specifier = "==1.2.4" },
+    { name = "ruff", specifier = "==0.17.4" },
 ]
 
 [[package]]

@@ -30,7 +30,7 @@ flowchart LR
 | --- | --- |
 | `GET /api/v1/health` | `backend/app/api/v1/health.py`. Runs `SELECT 1` with a timeout. Returns 200 `ok` or 503 `degraded`, and never leaks connection details |
 | Database | Async SQLAlchemy 2.1 engine on psycopg 3 (`backend/app/db/session.py`), Alembic baseline `0001_baseline` (enables `citext`) |
-| Security | Strict CORS allow-list from env, security headers middleware, `/docs` disabled in production |
+| Security | Strict CORS allow-list from env (https-only, no wildcard in staging/production), required `DATABASE_URL` in staging/production, security headers middleware, `/docs` and `/openapi.json` disabled in production |
 | Web | `web/src/components/HealthStatus.tsx` (TanStack Query + Zod) on the home page. Base URL from `NEXT_PUBLIC_API_BASE_URL` |
 | Android | Retrofit 3 + OkHttp 5 + kotlinx.serialization → `NetworkHealthRepository` → `HomeViewModel` (StateFlow) → Compose `HomeScreen`. Base URL from `BuildConfig.API_BASE_URL` (`10.0.2.2` in debug) |
 | Local infra | `infrastructure/docker/compose.dev.yml`: Postgres 18.6, Redis 8.10.3, SeaweedFS 4.53 (S3). All bound to 127.0.0.1 |

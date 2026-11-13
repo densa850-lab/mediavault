@@ -7,6 +7,7 @@
     <string name="status_degraded">Backend reachable, database unavailable</string>
     <string name="status_error">Backend unreachable</string>
     <string name="status_error_hint">Make sure the backend is running on port 8000. Server: %1$s</string>
+    <string name="status_error_reason">Reason (debug build): %1$s</string>
     <string name="label_service">Service</string>
     <string name="label_version">Version</string>
     <string name="label_environment">Environment</string>
