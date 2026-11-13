@@ -5,6 +5,7 @@ Never hard-code secrets here. Real values belong in each environment's secret st
 Deployed environments (staging, production) are strict:
 - DATABASE_URL is required. There is no built-in fallback (MV-001).
 - CORS origins must be explicit https:// origins. "*" and http:// are rejected (MV-002).
+- JWT_SECRET is required and must be at least 32 characters. The dev/test default is refused.
 A misconfiguration raises ConfigurationError at startup with a message that never contains
 the database URL, credentials or any other configured value.
 """
@@ -22,6 +23,9 @@ DEPLOYED_ENVIRONMENTS: frozenset[str] = frozenset({"staging", "production"})
 # Local-only default for development/test (matches infrastructure/docker/compose.dev.yml).
 # It is never used in staging or production.
 _LOCAL_DEV_DATABASE_URL = "postgresql+psycopg://mediavault:mediavault@localhost:5432/mediavault"
+# Publicly known, development/test only. Staging/production refuse it (see validator below).
+_DEV_ONLY_JWT_SECRET = "dev-only-insecure-jwt-secret-not-for-deployment"  # noqa: S105
+MIN_JWT_SECRET_LENGTH = 32
 
 
 class ConfigurationError(RuntimeError):
@@ -67,10 +71,23 @@ class Settings(BaseSettings):
     database_url: str | None = None
     database_connect_timeout_s: int = 3
 
+    # --- Auth (Phase 2 step 1) ---
+    # HS256 signing key for access tokens. Required in staging/production (>= 32 chars).
+    jwt_secret: str | None = None
+    access_token_ttl_s: int = 15 * 60
+    refresh_token_ttl_s: int = 30 * 24 * 60 * 60
+    # In-memory, per-process fixed-window limits for /auth/login and /auth/register.
+    auth_rate_limit_per_ip: int = 20
+    auth_rate_limit_per_email: int = 5
+    auth_rate_limit_window_s: int = 60
+    # Peers (e.g. the website's server) allowed to pass the real client IP in X-Forwarded-For.
+    # Comma-separated exact IPs. Empty = never trust X-Forwarded-For.
+    auth_trusted_proxies: Annotated[list[str], NoDecode] = []
+
     # Comma-separated exact origins allowed to call the API from a browser.
     cors_allow_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
 
-    @field_validator("cors_allow_origins", mode="before")
+    @field_validator("cors_allow_origins", "auth_trusted_proxies", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:
         if isinstance(value, str):
@@ -94,13 +111,32 @@ class Settings(BaseSettings):
                     f"{len(bad)} origin(s) are not explicit https:// origins "
                     "('*', wildcards, http://, paths and credentials are rejected)."
                 )
-        elif not self.database_url:
-            self.database_url = _LOCAL_DEV_DATABASE_URL
+            secret = (self.jwt_secret or "").strip()
+            if not secret or secret == _DEV_ONLY_JWT_SECRET:
+                raise ConfigurationError(
+                    f"JWT_SECRET must be set when ENVIRONMENT={self.environment}; "
+                    "the development default is not accepted."
+                )
+            if len(secret) < MIN_JWT_SECRET_LENGTH:
+                raise ConfigurationError(
+                    f"JWT_SECRET is too short for ENVIRONMENT={self.environment}: "
+                    f"at least {MIN_JWT_SECRET_LENGTH} characters are required."
+                )
+        else:
+            if not self.database_url:
+                self.database_url = _LOCAL_DEV_DATABASE_URL
+            if not self.jwt_secret:
+                self.jwt_secret = _DEV_ONLY_JWT_SECRET
         return self
 
     @property
     def is_deployed(self) -> bool:
         return self.environment in DEPLOYED_ENVIRONMENTS
+
+    @property
+    def resolved_jwt_secret(self) -> str:
+        assert self.jwt_secret is not None
+        return self.jwt_secret
 
     @property
     def resolved_database_url(self) -> str:

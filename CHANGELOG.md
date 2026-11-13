@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased: Phase 2 step 1 (accounts, login, ownership)
+
+* Backend: `users` (case-insensitive unique email, argon2id hash), `auth_sessions`, `refresh_tokens`
+  (sha256 only) and a `media_items` **stub** (no files), migration `0002_auth`.
+* `/api/v1/auth` register / login / refresh / logout / me: 15-minute access JWT bound to a
+  server-side session, rotating single-use refresh tokens with reuse detection, generic errors,
+  12-character minimum, in-memory rate limits on login/register.
+* `JWT_SECRET` required (32+ characters, not the dev default) in staging/production.
+* Ownership: every `/api/v1/media-items` query is scoped to the signed-in user; others' rows are 404.
+* Web: login / register / account pages; tokens only in HttpOnly SameSite=Strict cookies via the
+  website's `/api/auth/*` routes, with an Origin check.
+* Android: sign-in / register / sign-out screen; tokens encrypted with Tink (Android Keystore
+  master key) in DataStore.
+* CI: backend job also runs `alembic upgrade head && alembic check`.
+
 ## Unreleased: Phase 1 remediation (no new features)
 
 * MV-001: staging/production refuse to start without `DATABASE_URL`; no default credentials there.

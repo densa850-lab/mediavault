@@ -35,6 +35,18 @@ flowchart LR
 | Android | Retrofit 3 + OkHttp 5 + kotlinx.serialization → `NetworkHealthRepository` → `HomeViewModel` (StateFlow) → Compose `HomeScreen`. Base URL from `BuildConfig.API_BASE_URL` (`10.0.2.2` in debug) |
 | Local infra | `infrastructure/docker/compose.dev.yml`: Postgres 18.6, Redis 8.10.3, SeaweedFS 4.53 (S3). All bound to 127.0.0.1 |
 
+## Phase 2 step 1: accounts, login, ownership
+
+| Piece | Implementation |
+| --- | --- |
+| Schema (`0002_auth`) | `users` (UUID, `citext` unique email, argon2id hash, `is_active`), `auth_sessions` (expiry, revocation reason), `refresh_tokens` (sha256 only, single use), `media_items` **stub** (owner + title, no files) |
+| Tokens | HS256 access JWT, 15 min, claims `iss`, `aud`, `sub`, `sid`, `typ`, `iat`, `exp`, `jti`. Every request also checks the server-side session, so logout and reuse revocation apply immediately. Refresh tokens are opaque 256-bit values, rotated on every use (row locked `FOR UPDATE`); presenting a used one revokes the session |
+| Secrets | `JWT_SECRET` from env only. Development/test fall back to a clearly named dev value; staging/production refuse to start without a 32+ character non-default secret |
+| Abuse | Generic errors, dummy argon2 verify for unknown emails, constant register response, in-memory fixed-window limits per IP and per email (per process; Redis later) |
+| Ownership | `CurrentUser` dependency; every `media_items` query filters on `owner_id`, so other users' rows are indistinguishable from missing ones (404) |
+| Web | Backend-for-frontend: `src/app/api/auth/*` route handlers call the API server-side and store tokens only in `HttpOnly; SameSite=Strict; Secure` cookies (`mv_refresh` scoped to `/api/auth`). State-changing routes require a same-origin `Origin` header |
+| Android | `NetworkAuthRepository` + `EncryptedTokenStore`: DataStore holding Tink AES-256-GCM ciphertext; the Tink keyset is wrapped by an Android Keystore key. Backups are disabled. (EncryptedSharedPreferences is deprecated, so it isn't used) |
+
 ## Key decisions
 
 * **Retrofit 3.0.0 with OkHttp 5.5.1.** Retrofit 3.0.0's POM declares OkHttp 4.12.0. Gradle resolves it

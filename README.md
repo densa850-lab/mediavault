@@ -89,6 +89,31 @@ Expected (HTTP 200):
 If the database is down, you get HTTP 503 with `"status":"degraded"` and `"database":"error"`.
 The interactive API docs are at http://localhost:8000/docs.
 
+**Accounts (Phase 2 step 1).** `uv run alembic upgrade head` also creates the `users`,
+`auth_sessions`, `refresh_tokens` and `media_items` (ownership stub, no files) tables. Try it:
+
+```bash
+curl -X POST localhost:8000/api/v1/auth/register -H 'content-type: application/json' \
+  -d '{"email":"you@example.com","password":"at-least-12-characters"}'     # 202
+curl -X POST localhost:8000/api/v1/auth/login -H 'content-type: application/json' \
+  -d '{"email":"you@example.com","password":"at-least-12-characters"}'     # access + refresh token
+curl localhost:8000/api/v1/auth/me -H "authorization: Bearer <access_token>"
+```
+
+| Endpoint | What it does |
+| --- | --- |
+| `POST /api/v1/auth/register` | Always `202` with the same message (no account enumeration). Password 12 to 128 characters |
+| `POST /api/v1/auth/login` | `200` with a 15-minute access JWT and a 30-day single-use refresh token, or a generic `401` |
+| `POST /api/v1/auth/refresh` | Rotates the refresh token. Re-using an old refresh token revokes that whole session |
+| `POST /api/v1/auth/logout` | Revokes the session (refresh token in the body and/or the bearer token). Always `204` |
+| `GET /api/v1/auth/me` | The signed-in user |
+| `/api/v1/media-items` | **Stub** (title only, no upload) used to prove per-user ownership: other users' rows are `404` |
+
+Login and register are rate-limited per client IP and per email (defaults: 20 and 5 attempts per
+60 s, `429` with `Retry-After`). The limiter is **in memory, per process**: with several API
+processes the effective limit multiplies, and it resets on restart. A shared Redis limiter is
+planned before running more than one process.
+
 ### Terminal 2: website
 
 ```bash
@@ -100,7 +125,10 @@ cp .env.example .env.local       # Windows PowerShell: Copy-Item .env.example .e
 pnpm dev
 ```
 
-Open http://localhost:3000. The card should say **Backend connected**.
+Open http://localhost:3000. The card should say **Backend connected**. **Account** in the header
+opens sign-in/register. The browser never sees tokens: the website's own `/api/auth/*` routes call
+the API server-side (`API_INTERNAL_BASE_URL`, falling back to `NEXT_PUBLIC_API_BASE_URL`) and keep
+the tokens in `HttpOnly`, `SameSite=Strict` cookies (`Secure` in production).
 
 ### Terminal 3: Android app (emulator running)
 
@@ -139,7 +167,7 @@ cd backend && uv run ruff check . && uv run pytest -v
 # a bare `pnpm exec tsc --noEmit` also works on a fresh clone.
 cd web && pnpm lint && pnpm typecheck && pnpm test && pnpm build
 
-# Android (JVM unit tests + lint; the UI tests need a running emulator)
+# Android (JVM unit tests + lint; the UI tests and the encrypted token store test need an emulator)
 cd android && ./gradlew assembleDebug testDebugUnitTest lintDebug
 cd android && ./gradlew connectedDebugAndroidTest
 # Optional: unit-test the app's network stack against your running backend
@@ -166,6 +194,15 @@ The backend refuses to start (`ConfigurationError`, no values echoed) when `ENVI
 * `DATABASE_URL` is missing or empty. There is no built-in database default outside development/test.
 * `CORS_ALLOW_ORIGINS` contains `*`, a wildcard, an `http://` origin, a path, a query or credentials.
   Only explicit `https://host[:port]` origins are accepted.
+* `JWT_SECRET` is missing, equals the development default, or is shorter than 32 characters.
+  Generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"` and keep it in
+  the environment's secret store. Rotating it invalidates all access tokens.
+
+Other auth settings (env): `ACCESS_TOKEN_TTL_S` (900), `REFRESH_TOKEN_TTL_S` (2592000),
+`AUTH_RATE_LIMIT_PER_IP` (20), `AUTH_RATE_LIMIT_PER_EMAIL` (5), `AUTH_RATE_LIMIT_WINDOW_S` (60) and
+`AUTH_TRUSTED_PROXIES` (comma-separated IPs/CIDRs, for example the website server; only these peers
+may set `X-Forwarded-For`, otherwise the socket address is used for rate limiting).
+On the website server set `API_INTERNAL_BASE_URL` to the API's internal address.
 
 In production `/docs`, `/redoc` and `/openapi.json` are not served.
 

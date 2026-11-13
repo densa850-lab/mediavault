@@ -2,14 +2,16 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from fastapi import FastAPI
 
 from app.api.v1.router import api_router
+from app.auth.rate_limit import FixedWindowRateLimiter
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, log
 from app.core.security import SecurityHeadersMiddleware, StrictCORSMiddleware
-from app.db.session import create_engine
+from app.db.session import create_engine, create_sessionmaker
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -20,6 +22,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.engine = create_engine(settings)
+        app.state.sessionmaker = create_sessionmaker(app.state.engine)
         log.info("startup", environment=settings.environment, version=settings.app_version)
         try:
             yield
@@ -36,6 +39,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=None if is_production else "/openapi.json",
     )
     app.state.settings = settings
+    # Injectable clock: tests move time forward to prove token expiry.
+    app.state.clock = lambda: datetime.now(UTC)
+    app.state.auth_rate_limiter = FixedWindowRateLimiter(lambda: app.state.clock().timestamp())
 
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(

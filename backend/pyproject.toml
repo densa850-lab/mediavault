@@ -13,6 +13,9 @@ dependencies = [
     "psycopg[binary]==3.3.9",
     "alembic==1.20.1",
     "structlog==26.1.0",
+    "argon2-cffi==25.1.0",
+    "pyjwt==2.15.1",
+    "email-validator==2.3.0",
 ]
 
 [dependency-groups]
@@ -37,3 +40,7 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "S"]
 ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use obviously fake credentials and token literals.
+"tests/**" = ["S105", "S106"]
