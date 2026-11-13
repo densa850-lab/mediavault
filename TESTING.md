@@ -1,5 +1,21 @@
 # Testing
 
+## CI
+
+`.github/workflows/ci.yml` runs on every pull request and every push to `main`, with no path
+filters, so these checks are always reported: `backend`, `web`, `android` and the final
+`ci-required` gate (fails unless all three succeed). The android job also proves that
+`assembleRelease` fails without / with a non-https API URL and succeeds with a valid one.
+
+**Compose UI tests in CI (plan, not yet enabled):** `app/src/androidTest` (6 tests: connected,
+loading, degraded, error-retry, debug error reason, release hides reason) compiles in CI via
+`assembleDebugAndroidTest`. Running them needs an emulator: add a job using
+`reactivecircus/android-emulator-runner` (KVM is available on GitHub-hosted Linux runners, API 34
+`google_apis` x86_64 image, `./gradlew connectedDebugAndroidTest`), first as non-required for a week
+to measure flakiness, then make it required. Locally: `./gradlew connectedDebugAndroidTest` with an
+emulator running.
+
+
 ## Phase 1 results (run on 2026-11-12, Linux x86_64 dev box)
 
 | Suite | Command | Result |

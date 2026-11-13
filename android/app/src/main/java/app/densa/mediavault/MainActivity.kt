@@ -19,7 +19,11 @@ class MainActivity : ComponentActivity() {
                 val vm: HomeViewModel = viewModel(
                     factory = HomeViewModel.factory(container.healthRepository),
                 )
-                HomeRoute(viewModel = vm, serverUrl = container.apiBaseUrl)
+                HomeRoute(
+                    viewModel = vm,
+                    serverUrl = container.apiBaseUrl,
+                    showErrorReason = BuildConfig.DEBUG,
+                )
             }
         }
     }

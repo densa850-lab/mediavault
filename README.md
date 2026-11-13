@@ -20,7 +20,7 @@ Stories or other private or protected content.
 | `web/` | Next.js 16 + React 19 + TypeScript + Tailwind CSS 4 website |
 | `android/` | Kotlin + Jetpack Compose + Material 3 app (`app.densa.mediavault`) |
 | `infrastructure/docker/` | Local PostgreSQL 18, Redis 8 and SeaweedFS (S3) via Docker Compose |
-| `.github/workflows/` | CI: backend tests, web lint/test/build, Android build/tests/lint |
+| `.github/workflows/` | CI (`ci.yml`): backend, web and android jobs on every PR, plus the `ci-required` gate |
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and [TESTING.md](TESTING.md) for test results.
 
@@ -135,7 +135,8 @@ docker compose -f infrastructure/docker/compose.dev.yml --env-file .env down -v 
 # Backend (the database tests use TEST_DATABASE_URL from .env)
 cd backend && uv run ruff check . && uv run pytest -v
 
-# Website
+# Website. `pnpm typecheck` (= `next typegen && tsc --noEmit`) is the supported type check;
+# a bare `pnpm exec tsc --noEmit` also works on a fresh clone.
 cd web && pnpm lint && pnpm typecheck && pnpm test && pnpm build
 
 # Android (JVM unit tests + lint; the UI tests need a running emulator)
@@ -143,6 +144,8 @@ cd android && ./gradlew assembleDebug testDebugUnitTest lintDebug
 cd android && ./gradlew connectedDebugAndroidTest
 # Optional: unit-test the app's network stack against your running backend
 cd android && MEDIAVAULT_LIVE_API_URL=http://localhost:8000/ ./gradlew testDebugUnitTest
+# Release builds REQUIRE a real https:// API URL and fail without one (no placeholder fallback)
+cd android && ./gradlew assembleRelease -Pmediavault.releaseApiBaseUrl=https://api.your-domain.com/
 ```
 
 ## Troubleshooting
@@ -155,10 +158,22 @@ cd android && MEDIAVAULT_LIVE_API_URL=http://localhost:8000/ ./gradlew testDebug
 * **Port 5432 already in use:** set `POSTGRES_PORT=5433` in `.env`, update the port in
   `DATABASE_URL` and `TEST_DATABASE_URL`, then run `docker compose ... up -d` again.
 
+## Deployed environments (staging / production)
+
+The backend refuses to start (`ConfigurationError`, no values echoed) when `ENVIRONMENT` is
+`staging` or `production` and:
+
+* `DATABASE_URL` is missing or empty. There is no built-in database default outside development/test.
+* `CORS_ALLOW_ORIGINS` contains `*`, a wildcard, an `http://` origin, a path, a query or credentials.
+  Only explicit `https://host[:port]` origins are accepted.
+
+In production `/docs`, `/redoc` and `/openapi.json` are not served.
+
 ## Security rules for contributors
 
 * Never commit `.env`, keystores, API keys or real passwords. Only `.env.example` files belong in git.
 * Debug Android builds allow plain HTTP **only** to `10.0.2.2`, `localhost` and `127.0.0.1`.
-  Release builds are HTTPS-only.
+  Release builds are HTTPS-only and need `-Pmediavault.releaseApiBaseUrl=https://...`.
+* All changes to `main` go through a pull request; the `ci-required` check must pass.
 * Don't add scraping, login-bypass or DRM-bypass code, or anything that downloads content the
   user isn't authorized to use.
