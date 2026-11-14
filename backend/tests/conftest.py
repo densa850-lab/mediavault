@@ -7,15 +7,20 @@ They are skipped (and reported as skipped) when it is not set.
 """
 
 import os
-from collections.abc import Iterator
-from pathlib import Path
 
-import pytest
-from dotenv import dotenv_values
-from fastapi.testclient import TestClient
+# The app refuses to start without an explicit ENVIRONMENT (MV-018). Tests run as "test" unless
+# the caller set something else. Must happen before app.main is imported (it builds an app).
+os.environ.setdefault("ENVIRONMENT", "test")
 
-from app.core.config import Settings
-from app.main import create_app
+from collections.abc import Iterator  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+from dotenv import dotenv_values  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from app.core.config import Settings  # noqa: E402
+from app.main import create_app  # noqa: E402
 
 _ROOT_ENV = Path(__file__).resolve().parents[2] / ".env"
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL") or (

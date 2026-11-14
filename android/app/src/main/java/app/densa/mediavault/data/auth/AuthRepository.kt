@@ -94,34 +94,57 @@ class NetworkAuthRepository(private val api: AuthApi, private val store: TokenSt
             if (me.isSuccessful && user != null) return@withLock SessionState.SignedIn(user)
             if (me.code() != 401) return@withLock SessionState.Unavailable("Server error (HTTP ${me.code()}).")
         }
+        // A network error here propagates to currentSession(), which reports Unavailable and keeps
+        // the tokens.
         val rotated = api.refresh(RefreshDto(current.refreshToken))
         val pair = rotated.body()
-        if (!rotated.isSuccessful || pair == null) {
-            // Expired, revoked or reused refresh token: the session is over.
+        if (rotated.isSuccessful && pair != null) {
+            store.save(StoredTokens(pair.accessToken, pair.refreshToken))
+        } else if (refreshDefinitelyRejected(rotated.code())) {
+            // Expired, revoked, reused or malformed refresh token: the session is over.
             store.clear()
             return@withLock SessionState.SignedOut
+        } else {
+            // 429, 5xx or anything unexpected: temporary. Keep the tokens (MV-023).
+            return@withLock SessionState.Unavailable(temporaryMessage(rotated.code()))
         }
-        store.save(StoredTokens(pair.accessToken, pair.refreshToken))
         val me = api.me(bearer(pair.accessToken))
         val user = me.body()
-        if (me.isSuccessful && user != null) {
-            SessionState.SignedIn(user)
-        } else {
-            store.clear()
-            SessionState.SignedOut
+        when {
+            me.isSuccessful && user != null -> SessionState.SignedIn(user)
+            me.code() == 401 -> {
+                store.clear()
+                SessionState.SignedOut
+            }
+            // The new pair is already saved; just report the temporary problem.
+            else -> SessionState.Unavailable(temporaryMessage(me.code()))
         }
     }
 
-    /** Revokes the session on the server (best effort) and always forgets the tokens locally. */
+    /**
+     * Revokes the session on the server and always forgets the tokens locally. A temporary failure
+     * (429, 5xx, network) is retried once before giving up on the server-side revoke (MV-024).
+     */
     override suspend fun logout() {
         tokenLock.withLock {
             val tokens = store.read()
             try {
-                if (tokens != null) api.logout(bearer(tokens.accessToken), LogoutDto(tokens.refreshToken))
+                if (tokens != null) {
+                    repeat(LOGOUT_ATTEMPTS) {
+                        val ok = try {
+                            api.logout(bearer(tokens.accessToken), LogoutDto(tokens.refreshToken)).isSuccessful
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: IOException) {
+                            false
+                        }
+                        if (ok) return@withLock
+                    }
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                // Server unreachable: local sign-out still happens.
+                // Unexpected response: local sign-out still happens.
             } finally {
                 store.clear()
             }
@@ -151,7 +174,17 @@ class NetworkAuthRepository(private val api: AuthApi, private val store: TokenSt
         const val INVALID_CREDENTIALS = "Invalid email or password."
         const val UNREACHABLE = "The MediaVault server could not be reached."
 
+        const val LOGOUT_ATTEMPTS = 2
+
         fun bearer(token: String) = "Bearer $token"
+
+        /** Only these answers mean the refresh token can never work again (MV-023). */
+        fun refreshDefinitelyRejected(code: Int) = code == 401 || code == 422
+
+        fun temporaryMessage(code: Int) = when (code) {
+            429 -> "The server is busy. You are still signed in; try again in a moment."
+            else -> "Server error (HTTP $code). You are still signed in; try again in a moment."
+        }
 
         /** First FastAPI validation message, e.g. "Password must be at least 12 characters." */
         fun validationMessage(raw: String?): String? = runCatching {

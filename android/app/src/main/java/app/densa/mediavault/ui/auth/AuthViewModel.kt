@@ -24,6 +24,9 @@ sealed interface AuthUiState {
         val notice: String? = null,
     ) : AuthUiState
     data class SignedIn(val email: String) : AuthUiState
+
+    /** The session could not be checked right now (busy / offline). Tokens are kept; retry. */
+    data class Unavailable(val message: String) : AuthUiState
 }
 
 class AuthViewModel(private val repository: AuthRepository) : ViewModel() {
@@ -36,10 +39,11 @@ class AuthViewModel(private val repository: AuthRepository) : ViewModel() {
 
     fun loadSession() {
         viewModelScope.launch {
+            if (_state.value is AuthUiState.Unavailable) _state.value = AuthUiState.Checking
             _state.value = when (val s = repository.currentSession()) {
                 is SessionState.SignedIn -> AuthUiState.SignedIn(s.user.email)
                 SessionState.SignedOut -> AuthUiState.SignedOut()
-                is SessionState.Unavailable -> AuthUiState.SignedOut(error = s.message)
+                is SessionState.Unavailable -> AuthUiState.Unavailable(s.message)
             }
         }
     }

@@ -297,3 +297,84 @@ def test_production_import_without_jwt_secret_exits_with_safe_error(tmp_path: Pa
     assert proc.returncode != 0
     assert "JWT_SECRET must be set" in proc.stderr
     assert "FAKE-test-only-pw" not in proc.stderr
+
+
+# ---------- MV-018: ENVIRONMENT must be explicit ----------
+
+
+def test_unset_environment_is_refused() -> None:
+    with pytest.raises(ConfigurationError) as exc:
+        Settings(_env_file=None)  # type: ignore[call-arg]
+    assert "ENVIRONMENT must be set explicitly" in str(exc.value)
+
+
+def test_import_without_environment_exits_with_safe_error(tmp_path: Path) -> None:
+    """With no ENVIRONMENT the app must not start on dev defaults (dev JWT secret, local DB)."""
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k
+        not in {
+            "ENVIRONMENT",
+            "DATABASE_URL",
+            "TEST_DATABASE_URL",
+            "CORS_ALLOW_ORIGINS",
+            "JWT_SECRET",
+        }
+    }
+    env.update(DATABASE_URL=SECRET_URL, PYTHONPATH=str(BACKEND_DIR))
+    proc = subprocess.run(  # noqa: S603 - fixed argv, test only
+        [sys.executable, "-c", "import app.main"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode != 0
+    assert "ENVIRONMENT must be set explicitly" in proc.stderr
+    assert "FAKE-test-only-pw" not in proc.stderr + proc.stdout
+
+
+@pytest.mark.parametrize("env", ["development", "test"])
+def test_explicit_local_environment_still_gets_local_defaults(env: str) -> None:
+    s = Settings(_env_file=None, environment=env)  # type: ignore[arg-type]
+    assert s.resolved_jwt_secret and s.resolved_database_url
+
+
+def test_deployed_env_rejects_low_entropy_jwt_secret() -> None:
+    with pytest.raises(ConfigurationError) as exc:
+        _settings(
+            environment="production",
+            database_url=SECRET_URL,
+            cors_allow_origins=[TRUSTED],
+            jwt_secret="a" * 40,
+        )
+    assert "too weak" in str(exc.value) and "aaaa" not in str(exc.value)
+
+
+# ---------- MV-025: startup warning when no trusted proxy is configured in production ----------
+
+
+def _startup_output(capsys: pytest.CaptureFixture[str], **kw: object) -> str:
+    settings = _settings(
+        environment="production",
+        database_url=UNREACHABLE_DB_URL,
+        cors_allow_origins=[TRUSTED],
+        **kw,
+    )
+    with TestClient(create_app(settings)):
+        pass
+    return capsys.readouterr().out
+
+
+def test_production_without_trusted_proxies_warns_at_startup(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert "auth.no_trusted_proxies" in _startup_output(capsys)
+
+
+def test_production_with_trusted_proxies_does_not_warn(capsys: pytest.CaptureFixture[str]) -> None:
+    assert "auth.no_trusted_proxies" not in _startup_output(
+        capsys, auth_trusted_proxies=["10.0.0.5"]
+    )
