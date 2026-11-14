@@ -174,26 +174,111 @@ def test_refresh_rotates_tokens(db_client: TestClient) -> None:
     assert t3.status_code == 200
 
 
-def test_refresh_reuse_revokes_whole_session(db_client: TestClient) -> None:
+def _set_clock(c: TestClient, when: datetime) -> None:
+    c.app.state.clock = lambda: when  # type: ignore[attr-defined]
+
+
+def _refresh(c: TestClient, raw: str):  # noqa: ANN202 - test helper
+    return c.post("/api/v1/auth/refresh", json={"refresh_token": raw})
+
+
+GRACE = make_settings().refresh_reuse_grace_s
+
+
+def test_refresh_reuse_after_grace_revokes_whole_session(db_client: TestClient) -> None:
     register(db_client, A)
+    t0 = datetime.now(UTC)
+    _set_clock(db_client, t0)
     t1 = login(db_client, A)
-    t2 = db_client.post("/api/v1/auth/refresh", json={"refresh_token": t1["refresh_token"]}).json()
-    # Attacker replays the old (already used) refresh token.
-    replay = db_client.post("/api/v1/auth/refresh", json={"refresh_token": t1["refresh_token"]})
+    t2 = _refresh(db_client, t1["refresh_token"]).json()
+    # Attacker replays the old (already used) refresh token after the concurrency grace.
+    _set_clock(db_client, t0 + timedelta(seconds=GRACE + 1))
+    replay = _refresh(db_client, t1["refresh_token"])
     assert replay.status_code == 401
     # Every token of that session is now dead, including the legitimate new ones.
     assert db_client.get("/api/v1/auth/me", headers=auth(t2)).status_code == 401
-    newer = db_client.post("/api/v1/auth/refresh", json={"refresh_token": t2["refresh_token"]})
-    assert newer.status_code == 401
+    assert _refresh(db_client, t2["refresh_token"]).status_code == 401
     assert sql("SELECT revoked_reason FROM auth_sessions")[0][0] == "refresh_reuse"
+
+
+def test_reuse_within_grace_returns_same_successor(db_client: TestClient) -> None:
+    register(db_client, A)
+    t0 = datetime.now(UTC)
+    _set_clock(db_client, t0)
+    t1 = login(db_client, A)
+    first = _refresh(db_client, t1["refresh_token"]).json()
+    _set_clock(db_client, t0 + timedelta(seconds=GRACE))  # last second of the grace window
+    second = _refresh(db_client, t1["refresh_token"])
+    assert second.status_code == 200
+    second = second.json()
+    assert second["refresh_token"] == first["refresh_token"]  # same successor, not a new branch
+    assert db_client.get("/api/v1/auth/me", headers=auth(first)).status_code == 200
+    assert db_client.get("/api/v1/auth/me", headers=auth(second)).status_code == 200
+    assert sql("SELECT revoked_at FROM auth_sessions")[0][0] is None
+    # Only one successor row exists for the session (login token + one successor).
+    assert sql("SELECT count(*) FROM refresh_tokens")[0][0] == 2
+    # The shared successor keeps rotating normally.
+    assert _refresh(db_client, first["refresh_token"]).status_code == 200
+
+
+def test_reuse_within_grace_after_successor_used_revokes(db_client: TestClient) -> None:
+    """Grace only covers the direct, still-unused successor: an older branch is a replay."""
+    register(db_client, A)
+    t0 = datetime.now(UTC)
+    _set_clock(db_client, t0)
+    t1 = login(db_client, A)
+    t2 = _refresh(db_client, t1["refresh_token"]).json()
+    t3 = _refresh(db_client, t2["refresh_token"]).json()
+    assert _refresh(db_client, t1["refresh_token"]).status_code == 401
+    assert db_client.get("/api/v1/auth/me", headers=auth(t3)).status_code == 401
+    assert sql("SELECT revoked_reason FROM auth_sessions")[0][0] == "refresh_reuse"
+
+
+def test_grace_disabled_means_strict_single_use(db_client: TestClient) -> None:
+    from app.main import create_app
+
+    with TestClient(create_app(make_settings(refresh_reuse_grace_s=0))) as c:
+        register(c, A)
+        t1 = login(c, A)
+        t2 = _refresh(c, t1["refresh_token"]).json()
+        assert _refresh(c, t1["refresh_token"]).status_code == 401
+        assert c.get("/api/v1/auth/me", headers=auth(t2)).status_code == 401
+
+
+def test_grace_nonce_cleared_once_successor_used_and_no_raw_tokens_stored(
+    db_client: TestClient,
+) -> None:
+    register(db_client, A)
+    t1 = login(db_client, A)
+    t2 = _refresh(db_client, t1["refresh_token"]).json()
+    rows = sql("SELECT token_hash, successor_nonce, replaced_by_id FROM refresh_tokens")
+    hashes = {r[0] for r in rows}
+    for raw in (t1["refresh_token"], t2["refresh_token"]):
+        assert raw not in hashes  # only sha256 digests are stored
+        assert all(raw.encode() not in bytes(r[1] or b"") for r in rows)
+    assert sum(1 for r in rows if r[1] is not None) == 1  # t1 holds the nonce for t2
+    _refresh(db_client, t2["refresh_token"])
+    rows = sql("SELECT successor_nonce FROM refresh_tokens WHERE replaced_by_id IS NOT NULL")
+    assert sum(1 for r in rows if r[0] is not None) == 1  # only the newest predecessor keeps one
+
+
+def test_grace_reissue_on_revoked_or_expired_session_fails(db_client: TestClient) -> None:
+    register(db_client, A)
+    t1 = login(db_client, A)
+    t2 = _refresh(db_client, t1["refresh_token"]).json()
+    db_client.post("/api/v1/auth/logout", headers=auth(t2))
+    assert _refresh(db_client, t1["refresh_token"]).status_code == 401
 
 
 def test_reuse_in_one_session_does_not_affect_other_sessions(db_client: TestClient) -> None:
     register(db_client, A)
+    t0 = datetime.now(UTC)
+    _set_clock(db_client, t0)
     phone = login(db_client, A)
     laptop = login(db_client, A)
-    db_client.post("/api/v1/auth/refresh", json={"refresh_token": phone["refresh_token"]})
-    db_client.post("/api/v1/auth/refresh", json={"refresh_token": phone["refresh_token"]})
+    _refresh(db_client, phone["refresh_token"])
+    _set_clock(db_client, t0 + timedelta(seconds=GRACE + 1))
+    assert _refresh(db_client, phone["refresh_token"]).status_code == 401
     assert db_client.get("/api/v1/auth/me", headers=auth(laptop)).status_code == 200
 
 

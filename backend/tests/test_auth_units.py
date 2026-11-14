@@ -20,6 +20,7 @@ from app.auth.tokens import (
     hash_refresh_token,
     new_refresh_token,
 )
+from tests.conftest import make_settings
 
 SECRET = "unit-test-signing-key-0123456789abcdef"  # noqa: S105 - test value
 NOW = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
@@ -165,3 +166,47 @@ def test_client_ip_trusted_proxies_accept_cidr_ranges() -> None:
     # A peer outside the range cannot spoof, and a malformed entry never trusts anything.
     assert client_ip(_req("192.0.2.1", "198.51.100.7"), trusted) == "192.0.2.1"
     assert client_ip(_req("192.0.2.1", "198.51.100.7"), ["not-an-ip"]) == "192.0.2.1"
+
+
+def test_successor_derivation_requires_the_predecessor_token_and_nonce() -> None:
+    import uuid
+
+    from app.auth.tokens import derive_successor_refresh_token, hash_refresh_token
+
+    sid, succ_id = uuid.uuid4(), uuid.uuid4()
+    nonce = b"\x01" * 32
+    raw, digest = derive_successor_refresh_token(
+        "old-token", nonce=nonce, session_id=sid, successor_id=succ_id
+    )
+    assert digest == hash_refresh_token(raw) and len(raw) >= 43  # 256-bit, url-safe
+    again, _ = derive_successor_refresh_token(
+        "old-token", nonce=nonce, session_id=sid, successor_id=succ_id
+    )
+    assert again == raw  # deterministic for the holder of the old token
+    others = {
+        derive_successor_refresh_token(
+            "other-token", nonce=nonce, session_id=sid, successor_id=succ_id
+        )[0],
+        derive_successor_refresh_token(
+            "old-token", nonce=b"\x02" * 32, session_id=sid, successor_id=succ_id
+        )[0],
+        derive_successor_refresh_token(
+            "old-token", nonce=nonce, session_id=uuid.uuid4(), successor_id=succ_id
+        )[0],
+        derive_successor_refresh_token(
+            "old-token", nonce=nonce, session_id=sid, successor_id=uuid.uuid4()
+        )[0],
+    }
+    assert raw not in others and len(others) == 4
+
+
+@pytest.mark.parametrize("value", [-1, 61])
+def test_refresh_grace_is_bounded(value: int) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        make_settings(refresh_reuse_grace_s=value)
+
+
+def test_refresh_grace_default_is_short() -> None:
+    assert 0 < make_settings().refresh_reuse_grace_s <= 30

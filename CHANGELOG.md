@@ -14,6 +14,9 @@
 * Android: sign-in / register / sign-out screen; tokens encrypted with Tink (Android Keystore
   master key) in DataStore.
 * CI: backend job also runs `alembic upgrade head && alembic check`.
+* Concurrent refresh fix (PR #2 review): bounded, session-bound concurrency grace (`0003_refresh_grace`,
+  `REFRESH_REUSE_GRACE_S`, default 10 s) returning the same derived successor; website single-flight
+  refresh; Android `Mutex`-coordinated refresh/logout.
 
 ## Unreleased: Phase 1 remediation (no new features)
 

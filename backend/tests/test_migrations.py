@@ -50,7 +50,7 @@ def _tables() -> set[str]:
 def test_migrations_upgrade_downgrade_upgrade() -> None:
     cfg = _config()
     command.upgrade(cfg, "head")
-    assert _current_revision() == "0002_auth"
+    assert _current_revision() == "0003_refresh_grace"
     assert AUTH_TABLES <= _tables()
     command.downgrade(cfg, "0001_baseline")
     assert _current_revision() == "0001_baseline"
@@ -58,5 +58,5 @@ def test_migrations_upgrade_downgrade_upgrade() -> None:
     command.downgrade(cfg, "base")
     assert _current_revision() is None
     command.upgrade(cfg, "head")
-    assert _current_revision() == "0002_auth"
+    assert _current_revision() == "0003_refresh_grace"
     assert AUTH_TABLES <= _tables()
