@@ -14,16 +14,20 @@ from app.main import create_app
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 SECRET_URL = "postgresql+psycopg://fake_user:FAKE-test-only-pw@db.internal.example:5432/mv"  # noqa: S105 - fake test value
 TRUSTED = "https://app.mediavault.example"
+PROD_JWT = "fake-test-only-jwt-signing-key-0123456789abcdef"  # noqa: S105 - fake test value
 UNREACHABLE_DB_URL = "postgresql+psycopg://nobody:nopass@127.0.0.1:1/none"
 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("ENVIRONMENT", "DATABASE_URL", "CORS_ALLOW_ORIGINS"):
+    for name in ("ENVIRONMENT", "DATABASE_URL", "CORS_ALLOW_ORIGINS", "JWT_SECRET"):
         monkeypatch.delenv(name, raising=False)
 
 
 def _settings(**kw: object) -> Settings:
+    # Deployed environments now also need JWT_SECRET (Phase 2 step 1); supply a valid one unless a
+    # test sets it explicitly. The MV-001/MV-002 checks run before the JWT check.
+    kw.setdefault("jwt_secret", PROD_JWT)
     return Settings(_env_file=None, **kw)  # type: ignore[arg-type]
 
 
@@ -82,7 +86,7 @@ def test_production_import_without_database_url_exits_with_safe_error(tmp_path: 
     env = {
         k: v
         for k, v in os.environ.items()
-        if k not in {"DATABASE_URL", "TEST_DATABASE_URL", "CORS_ALLOW_ORIGINS"}
+        if k not in {"DATABASE_URL", "TEST_DATABASE_URL", "CORS_ALLOW_ORIGINS", "JWT_SECRET"}
     }
     env.update(
         ENVIRONMENT="production",
@@ -213,3 +217,83 @@ def test_staging_still_serves_openapi() -> None:
     )
     with TestClient(create_app(s)) as c:
         assert c.get("/openapi.json").status_code == 200
+
+
+# ---------- Phase 2 step 1: JWT_SECRET required in staging/production ----------
+
+
+@pytest.mark.parametrize("env", ["staging", "production"])
+def test_deployed_env_without_jwt_secret_fails_fast(env: str) -> None:
+    with pytest.raises(ConfigurationError) as exc:
+        _settings(
+            environment=env, database_url=SECRET_URL, cors_allow_origins=[TRUSTED], jwt_secret=None
+        )
+    msg = str(exc.value)
+    assert "JWT_SECRET must be set" in msg
+    assert "FAKE-test-only-pw" not in msg
+
+
+@pytest.mark.parametrize("env", ["staging", "production"])
+def test_deployed_env_rejects_dev_default_jwt_secret(env: str) -> None:
+    from app.core.config import _DEV_ONLY_JWT_SECRET
+
+    with pytest.raises(ConfigurationError):
+        _settings(
+            environment=env,
+            database_url=SECRET_URL,
+            cors_allow_origins=[TRUSTED],
+            jwt_secret=_DEV_ONLY_JWT_SECRET,
+        )
+
+
+@pytest.mark.parametrize("env", ["staging", "production"])
+def test_deployed_env_rejects_short_jwt_secret(env: str) -> None:
+    with pytest.raises(ConfigurationError) as exc:
+        _settings(
+            environment=env,
+            database_url=SECRET_URL,
+            cors_allow_origins=[TRUSTED],
+            jwt_secret="short-but-not-empty",
+        )
+    assert "too short" in str(exc.value)
+    assert "short-but-not-empty" not in str(exc.value)
+
+
+def test_deployed_env_jwt_secret_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("DATABASE_URL", SECRET_URL)
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", TRUSTED)
+    monkeypatch.setenv("JWT_SECRET", PROD_JWT)
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.resolved_jwt_secret == PROD_JWT
+
+
+@pytest.mark.parametrize("env", ["development", "test"])
+def test_dev_and_test_get_a_dev_jwt_secret(env: str) -> None:
+    s = Settings(_env_file=None, environment=env)  # type: ignore[call-arg]
+    assert len(s.resolved_jwt_secret) >= 32
+
+
+def test_production_import_without_jwt_secret_exits_with_safe_error(tmp_path: Path) -> None:
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in {"DATABASE_URL", "TEST_DATABASE_URL", "CORS_ALLOW_ORIGINS", "JWT_SECRET"}
+    }
+    env.update(
+        ENVIRONMENT="production",
+        DATABASE_URL=SECRET_URL,
+        CORS_ALLOW_ORIGINS=TRUSTED,
+        PYTHONPATH=str(BACKEND_DIR),
+    )
+    proc = subprocess.run(  # noqa: S603 - fixed argv, test only
+        [sys.executable, "-c", "import app.main"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode != 0
+    assert "JWT_SECRET must be set" in proc.stderr
+    assert "FAKE-test-only-pw" not in proc.stderr

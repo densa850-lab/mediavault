@@ -16,4 +16,25 @@
     <string name="db_error">Error</string>
     <string name="action_retry">Check again</string>
     <string name="footer_legal">MediaVault works only with media you own or are authorized to use.</string>
+    <string name="action_account">Account</string>
+    <string name="account_title">Account</string>
+    <string name="action_back">Back</string>
+    <string name="sign_in_title">Sign in</string>
+    <string name="register_title">Create an account</string>
+    <string name="label_email">Email</string>
+    <string name="label_password">Password</string>
+    <plurals name="password_hint">
+        <item quantity="one">At least %1$d character.</item>
+        <item quantity="other">At least %1$d characters.</item>
+    </plurals>
+    <plurals name="password_too_short">
+        <item quantity="one">Password must be at least %1$d character.</item>
+        <item quantity="other">Password must be at least %1$d characters.</item>
+    </plurals>
+    <string name="action_sign_in">Sign in</string>
+    <string name="action_create_account">Create account</string>
+    <string name="switch_to_register">Create an account</string>
+    <string name="switch_to_login">Already have an account? Sign in</string>
+    <string name="signed_in_as">Signed in as %1$s</string>
+    <string name="action_sign_out">Sign out</string>
 </resources>
