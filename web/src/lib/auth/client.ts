@@ -61,7 +61,12 @@ export function fetchCurrentUser(fetchImpl: typeof fetch = fetch): Promise<Curre
   const flight = (async () => {
     const res = await fetchImpl("/api/auth/me", { credentials: "same-origin", cache: "no-store" });
     if (res.status === 401) return null;
-    if (!res.ok) throw new Error("The MediaVault server could not be reached.");
+    if (!res.ok) {
+      // Anything but 401 is temporary (busy, unreachable): the session is kept, so let the caller
+      // offer a retry instead of treating the user as signed out (MV-023).
+      const body = await res.json().catch(() => null);
+      throw new Error(messageFrom(body, "The MediaVault server could not be reached."));
+    }
     const body = (await res.json()) as CurrentUser;
     return { id: body.id, email: body.email };
   })().finally(() => {
@@ -71,6 +76,16 @@ export function fetchCurrentUser(fetchImpl: typeof fetch = fetch): Promise<Curre
   return flight;
 }
 
-export async function signOut(fetchImpl: typeof fetch = fetch): Promise<void> {
-  await post("/api/auth/logout", undefined, fetchImpl);
+export type SignOutResult = { confirmed: true } | { confirmed: false; message: string };
+
+/** Signs out. The website always clears its cookies; `confirmed` says whether the server revoked. */
+export async function signOut(fetchImpl: typeof fetch = fetch): Promise<SignOutResult> {
+  const fallback = "Signed out on this device, but the server could not be reached to end the session.";
+  try {
+    const res = await post("/api/auth/logout", undefined, fetchImpl);
+    if (res.ok) return { confirmed: true };
+    return { confirmed: false, message: messageFrom(await res.json().catch(() => null), fallback) };
+  } catch {
+    return { confirmed: false, message: fallback };
+  }
 }

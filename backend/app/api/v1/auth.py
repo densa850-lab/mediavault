@@ -87,9 +87,11 @@ def _is_trusted(host: str, trusted_proxies: list[str]) -> bool:
 
 
 CLIENT_IP_HEADER = "x-mediavault-client-ip"
-# Rate-limit bucket for requests that carry forwarding headers from a peer we don't trust. Their
-# claimed address can't be believed (and uvicorn's proxy-header rewriting, if someone left it on,
-# may already have replaced the peer address with it), so they all share one bucket (MV-016).
+# Rate-limit key prefix for requests that carry forwarding headers from a peer we don't trust.
+# Their claimed address is never believed (MV-016). Normally they are keyed on the real peer, so
+# one abusive client can't exhaust a bucket other clients share (MV-025). Only when the peer looks
+# rewritten from X-Forwarded-For itself (uvicorn proxy headers left on: the peer address appears in
+# X-Forwarded-For) is the peer meaningless; those requests share one bucket.
 UNTRUSTED_FORWARDED = "untrusted-forwarded"
 
 
@@ -109,18 +111,25 @@ def client_ip(request: Request, trusted_proxies: list[str]) -> str:
       (which the website overwrites, never forwards) wins; otherwise X-Forwarded-For, walking
       from the right past trusted hops; otherwise the peer itself.
     * Any other peer: forwarding headers are never believed. If it sends X-Forwarded-For or
-      X-MediaVault-Client-IP anyway, it lands in one shared bucket, so rotating fake addresses
-      can't multiply its allowance.
+      X-MediaVault-Client-IP anyway, it is keyed on its own peer address (rotating fake addresses
+      changes nothing), or, if the peer itself looks rewritten from X-Forwarded-For, on one
+      shared bucket.
     """
     peer = request.client.host if request.client else "unknown"
     xff = request.headers.get("x-forwarded-for", "")
     named = request.headers.get(CLIENT_IP_HEADER)
+    hops = [h.strip() for h in xff.split(",") if h.strip()]
     if not _is_trusted(peer, trusted_proxies):
-        return UNTRUSTED_FORWARDED if (xff.strip() or named) else peer
+        if not hops and not named:
+            return peer
+        if peer in hops:
+            # uvicorn (or another server) probably replaced the peer with an XFF entry, so the
+            # "peer" is attacker-chosen: one shared bucket.
+            return UNTRUSTED_FORWARDED
+        return f"{UNTRUSTED_FORWARDED}:{peer}"
     from_header = _valid_ip(named)
     if from_header:
         return from_header
-    hops = [h.strip() for h in xff.split(",") if h.strip()]
     for hop in reversed(hops):
         if not _is_trusted(hop, trusted_proxies):
             return _valid_ip(hop) or UNTRUSTED_FORWARDED
@@ -139,18 +148,13 @@ def _failure_key(request: Request, settings: AppSettings, scope: str) -> str:
     return f"{scope}-fail:ip:{client_ip(request, settings.auth_trusted_proxies)}"
 
 
-def _check_failures(request: Request, settings: AppSettings, scope: str) -> None:
-    retry = request.app.state.auth_rate_limiter.retry_after(
-        _failure_key(request, settings, scope),
-        limit=settings.auth_rate_limit_refresh_failures_per_ip,
-        window_s=settings.auth_rate_limit_window_s,
-    )
-    if retry is not None:
-        raise _too_many(retry)
+def _record_failure(request: Request, settings: AppSettings, scope: str) -> float | None:
+    """Count one failed refresh / unmatched logout. Returns seconds to wait once over the limit.
 
-
-def _count_failure(request: Request, settings: AppSettings, scope: str) -> None:
-    request.app.state.auth_rate_limiter.hit(
+    Called only AFTER the token was checked and found invalid, so valid tokens never touch this
+    bucket and junk traffic can never block a real refresh or logout (MV-023, MV-024).
+    """
+    return request.app.state.auth_rate_limiter.hit(
         _failure_key(request, settings, scope),
         limit=settings.auth_rate_limit_refresh_failures_per_ip,
         window_s=settings.auth_rate_limit_window_s,
@@ -209,11 +213,13 @@ async def login(
 async def refresh(
     body: RefreshRequest, request: Request, db: DbSession, settings: AppSettings, now: Now
 ) -> TokenResponse:
-    _check_failures(request, settings, "refresh")
+    # The token is always checked first: a valid refresh token is never rate limited (MV-023).
     try:
         pair = await service.rotate(db, body.refresh_token, settings=settings, now=now)
     except service.AuthError:
-        _count_failure(request, settings, "refresh")
+        retry = _record_failure(request, settings, "refresh")
+        if retry is not None:
+            raise _too_many(retry) from None
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=INVALID_REFRESH) from None
     return _tokens(pair)
 
@@ -231,9 +237,10 @@ async def logout(
 ) -> Response:
     """Revoke the session named by the refresh token and/or the bearer token.
 
-    Always 204, except 429 once a client keeps sending logouts that name no session (MV-021).
+    A logout that names a valid session always revokes it and returns 204, never 429 (MV-024).
+    Only logouts that name no session count towards the per-IP limit (MV-021); past it they get
+    429 (nothing would have been revoked anyway).
     """
-    _check_failures(request, settings, "logout")
     session_id = None
     if credentials is not None:
         try:
@@ -250,7 +257,9 @@ async def logout(
         now=now,
     )
     if not matched:
-        _count_failure(request, settings, "logout")
+        retry = _record_failure(request, settings, "logout")
+        if retry is not None:
+            raise _too_many(retry)
     return Response(status_code=status.HTTP_204_NO_CONTENT, headers={"Cache-Control": "no-store"})
 
 

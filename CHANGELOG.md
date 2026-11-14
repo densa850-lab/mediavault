@@ -31,6 +31,17 @@
   * MV-019: validation errors no longer echo submitted values. MV-020: `Cache-Control: no-store`
     on auth responses. MV-021: failed refresh and unmatched logout attempts are rate limited per IP.
 
+* QA fixes, round 2 (Tester's re-gate of PR #4 at d68cc5a):
+  * MV-023: a valid refresh token is never rate limited (the token is checked before the failure
+    limit). Website and Android treat 429 / 5xx / network errors on refresh as temporary: tokens
+    kept, retryable error shown; only 401/422 sign the user out. A rotated pair is kept even if
+    the follow-up `/me` fails.
+  * MV-024: a logout naming a real session always revokes (never 429); only unmatched logouts
+    count. Website and Android retry a failed revoke once; the website reports an unconfirmed one.
+  * MV-025: untrusted forwarded requests keyed on their real peer (one shared bucket only when
+    the peer looks rewritten from XFF); production startup warnings for `WEB_TRUSTED_PROXY_HOPS=0`
+    and empty `AUTH_TRUSTED_PROXIES`; `DEPLOY.md`.
+
 ## Unreleased: Phase 1 remediation (no new features)
 
 * MV-001: staging/production refuse to start without `DATABASE_URL`; no default credentials there.

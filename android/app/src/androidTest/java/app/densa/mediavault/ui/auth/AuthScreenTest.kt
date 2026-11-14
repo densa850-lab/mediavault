@@ -26,6 +26,7 @@ class AuthScreenTest {
     private val submitted = mutableListOf<Pair<String, String>>()
     private val modes = mutableListOf<AuthMode>()
     private var logouts = 0
+    private var retries = 0
 
     private fun show(state: AuthUiState) {
         rule.setContent {
@@ -36,6 +37,7 @@ class AuthScreenTest {
                     onSubmit = { e, p -> submitted += e to p },
                     onModeChange = { modes += it },
                     onLogout = { logouts++ },
+                    onRetry = { retries++ },
                 )
             }
         }
@@ -96,5 +98,15 @@ class AuthScreenTest {
         rule.onNodeWithText("Sign out").performClick()
         rule.waitForIdle()
         assertEquals(1, logouts)
+    }
+
+    @Test
+    fun unavailable_showsMessage_andRetries_insteadOfTheSignInForm() {
+        show(AuthUiState.Unavailable("The server is busy. You are still signed in; try again in a moment."))
+        rule.onNodeWithText("The server is busy. You are still signed in; try again in a moment.").assertIsDisplayed()
+        rule.onNodeWithText("Try again").performClick()
+        rule.waitForIdle()
+        assertEquals(1, retries)
+        assertEquals(0, rule.onAllNodesWithTag("auth_submit").fetchSemanticsNodes().size)
     }
 }

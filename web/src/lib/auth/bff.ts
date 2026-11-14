@@ -145,7 +145,7 @@ async function callApi(
   fetchImpl: Fetch,
   path: string,
   init: RequestInit,
-): Promise<{ status: number; body: unknown } | null> {
+): Promise<{ status: number; body: unknown; retryAfter: string | null } | null> {
   try {
     const res = await fetchImpl(`${serverApiBaseUrl()}/api/v1${path}`, { ...init, cache: "no-store" });
     const text = await res.text();
@@ -155,13 +155,32 @@ async function callApi(
     } catch {
       body = null;
     }
-    return { status: res.status, body };
+    return { status: res.status, body, retryAfter: res.headers?.get?.("retry-after") ?? null };
   } catch {
     return null;
   }
 }
 
 const UNREACHABLE = { detail: "The MediaVault server could not be reached." };
+/** Temporary problem while checking a session that may well be valid: keep the cookies (MV-023). */
+const TEMPORARY = { detail: "The MediaVault server is busy. You are still signed in; try again in a moment." };
+const LOGOUT_UNCONFIRMED = {
+  detail: "Signed out on this device, but the server did not confirm the session was ended. Sign in and sign out again to make sure.",
+};
+
+function temporary(retryAfter?: string | null, cookies: string[] = []): Response {
+  const res = json(TEMPORARY, 503, cookies);
+  if (retryAfter && /^\d{1,5}$/.test(retryAfter)) res.headers.set("Retry-After", retryAfter);
+  return res;
+}
+
+/**
+ * Only these refresh answers mean the refresh token can never work again: 401 (expired, revoked,
+ * replayed or unknown) and 422 (malformed). Anything else (429, 5xx, network) is temporary.
+ */
+function refreshDefinitelyRejected(status: number): boolean {
+  return status === 401 || status === 422;
+}
 const FORBIDDEN = { detail: "Cross-site request blocked." };
 
 function detailOf(body: unknown, fallback: string): { detail: unknown } {
@@ -218,12 +237,19 @@ export async function handleLogout(req: Request, fetchImpl: Fetch = fetch): Prom
   const access = readCookie(req, ACCESS_COOKIE);
   const refresh = readCookie(req, REFRESH_COOKIE);
   if (access || refresh) {
-    // Best effort: cookies are cleared even if the API is unreachable.
-    await callApi(fetchImpl, "/auth/logout", {
-      method: "POST",
-      headers: forwardHeaders(req, access ? { Authorization: `Bearer ${access}` } : {}),
-      body: JSON.stringify({ refresh_token: refresh ?? null }),
-    });
+    // Cookies are always cleared (the user asked to sign out here). The server-side revoke is
+    // retried once on a temporary failure; if it still isn't confirmed the browser is told so
+    // instead of being shown a silent success (MV-024).
+    let confirmed = false;
+    for (let attempt = 0; attempt < 2 && !confirmed; attempt++) {
+      const res = await callApi(fetchImpl, "/auth/logout", {
+        method: "POST",
+        headers: forwardHeaders(req, access ? { Authorization: `Bearer ${access}` } : {}),
+        body: JSON.stringify({ refresh_token: refresh ?? null }),
+      });
+      confirmed = res !== null && res.status >= 200 && res.status < 300;
+    }
+    if (!confirmed) return json(LOGOUT_UNCONFIRMED, 502, clearCookies());
   }
   return json(null, 204, clearCookies());
 }
@@ -231,7 +257,7 @@ export async function handleLogout(req: Request, fetchImpl: Fetch = fetch): Prom
 type RefreshResult =
   | { kind: "ok"; tokens: TokenResponse }
   | { kind: "rejected" }
-  | { kind: "unreachable" };
+  | { kind: "temporary"; retryAfter: string | null };
 
 /**
  * Single-flight refresh, per server process: overlapping requests that carry the SAME refresh
@@ -261,9 +287,11 @@ function refreshOnce(req: Request, refresh: string, fetchImpl: Fetch): Promise<R
       headers: forwardHeaders(req),
       body: JSON.stringify({ refresh_token: refresh }),
     });
-    if (!rotated) return { kind: "unreachable" };
-    if (rotated.status !== 200) return { kind: "rejected" };
-    return { kind: "ok", tokens: rotated.body as TokenResponse };
+    if (!rotated) return { kind: "temporary", retryAfter: null };
+    if (rotated.status === 200) return { kind: "ok", tokens: rotated.body as TokenResponse };
+    if (refreshDefinitelyRejected(rotated.status)) return { kind: "rejected" };
+    // 429, 5xx, anything unexpected: the session may be perfectly valid, keep it (MV-023).
+    return { kind: "temporary", retryAfter: rotated.retryAfter };
   })().finally(() => inflightRefresh.delete(key));
   inflightRefresh.set(key, flight);
   return flight;
@@ -284,10 +312,14 @@ export async function handleMe(req: Request, fetchImpl: Fetch = fetch): Promise<
     });
     if (!me) return json(UNREACHABLE, 502);
     if (me.status === 200) return json(me.body, 200);
+    // Only a 401 means the access token is no good; anything else is a server problem, not a
+    // reason to spend the refresh token or drop the session.
+    if (me.status !== 401) return temporary(me.retryAfter);
   }
   if (!refresh) return json({ detail: "Not signed in." }, 401, access ? clearCookies() : []);
   const result = await refreshOnce(req, refresh, fetchImpl);
-  if (result.kind === "unreachable") return json(UNREACHABLE, 502);
+  // Temporary (429 / 5xx / unreachable): keep both cookies and let the browser retry (MV-023).
+  if (result.kind === "temporary") return temporary(result.retryAfter);
   // Rejected = expired, logged out, or replayed outside the API's concurrency grace (which
   // revokes the session server-side), so there is no newer valid pair left to protect.
   if (result.kind === "rejected") return json({ detail: "Not signed in." }, 401, clearCookies());
@@ -296,7 +328,8 @@ export async function handleMe(req: Request, fetchImpl: Fetch = fetch): Promise<
     method: "GET",
     headers: forwardHeaders(req, { Authorization: `Bearer ${tokens.access_token}` }),
   });
-  if (!me) return json(UNREACHABLE, 502);
-  if (me.status !== 200) return json({ detail: "Not signed in." }, 401, clearCookies());
+  if (me && me.status === 401) return json({ detail: "Not signed in." }, 401, clearCookies());
+  // The refresh token was rotated: the new pair must be stored even if /me failed temporarily.
+  if (!me || me.status !== 200) return temporary(me?.retryAfter, tokenCookies(tokens));
   return json(me.body, 200, tokenCookies(tokens));
 }

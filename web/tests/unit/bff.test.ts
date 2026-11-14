@@ -198,11 +198,14 @@ describe("logout", () => {
     expect(setCookies(res).every((c) => c.includes("Max-Age=0"))).toBe(true);
   });
 
-  it("still clears cookies when the API is down", async () => {
+  it("still clears cookies when the API is down, but says the revoke was not confirmed", async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new TypeError("down"));
     const res = await handleLogout(req("/api/auth/logout", { cookie: `${REFRESH_COOKIE}=ref-1` }), fetchImpl);
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(502);
+    expect((await res.json()).detail).toMatch(/did not confirm/);
     expect(setCookies(res)).toHaveLength(2);
+    expect(setCookies(res).every((c) => c.includes("Max-Age=0"))).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(2); // retried once
   });
 });
 

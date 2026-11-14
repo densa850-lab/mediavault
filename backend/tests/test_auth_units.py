@@ -148,9 +148,13 @@ def test_client_ip_ignores_forwarding_headers_from_untrusted_peer() -> None:
     assert client_ip(_req("203.0.113.9"), []) == "203.0.113.9"
     # MV-016: an untrusted peer that claims an address is never believed, and every such request
     # shares ONE bucket, whatever address it claims.
-    assert client_ip(_req("203.0.113.9", "1.2.3.4"), []) == UNTRUSTED_FORWARDED
-    assert client_ip(_req("203.0.113.9", "1.2.3.4"), ["10.0.0.5"]) == UNTRUSTED_FORWARDED
-    assert client_ip(_req("203.0.113.9", named="1.2.3.4"), ["10.0.0.5"]) == UNTRUSTED_FORWARDED
+    # MV-025: keyed on the real peer, not one global bucket other clients share.
+    keyed = f"{UNTRUSTED_FORWARDED}:203.0.113.9"
+    assert client_ip(_req("203.0.113.9", "1.2.3.4"), []) == keyed
+    assert client_ip(_req("203.0.113.9", "1.2.3.4"), ["10.0.0.5"]) == keyed
+    assert client_ip(_req("203.0.113.9", named="1.2.3.4"), ["10.0.0.5"]) == keyed
+    # Another untrusted client is in its own bucket.
+    assert client_ip(_req("203.0.113.10", "1.2.3.4"), []) == f"{UNTRUSTED_FORWARDED}:203.0.113.10"
 
 
 def test_client_ip_rotating_x_forwarded_for_maps_to_one_key() -> None:
@@ -168,6 +172,9 @@ def test_client_ip_survives_uvicorn_proxy_header_rewriting() -> None:
     from app.api.v1.auth import client_ip
 
     keys = {client_ip(_req(f"198.51.100.{i}", f"198.51.100.{i}"), []) for i in range(50)}
+    assert len(keys) == 1, keys
+    # uvicorn picks the right-most UNtrusted hop, so "X, 127.0.0.1" rewrites the peer to X.
+    keys = {client_ip(_req(f"198.51.100.{i}", f"198.51.100.{i}, 127.0.0.1"), []) for i in range(50)}
     assert len(keys) == 1, keys
 
 
@@ -199,8 +206,11 @@ def test_client_ip_trusted_proxies_accept_cidr_ranges() -> None:
     # Trusted hops inside the chain are skipped.
     assert client_ip(_req("10.1.2.3", "198.51.100.7, 10.9.9.9"), trusted) == "198.51.100.7"
     # Peers outside the range are not trusted.
-    assert client_ip(_req("192.0.2.1", "198.51.100.7"), trusted) == UNTRUSTED_FORWARDED
-    assert client_ip(_req("192.0.2.1", "198.51.100.7"), ["not-an-ip"]) == UNTRUSTED_FORWARDED
+    assert (
+        client_ip(_req("192.0.2.1", "198.51.100.7"), trusted) == f"{UNTRUSTED_FORWARDED}:192.0.2.1"
+    )
+    untrusted_cfg = client_ip(_req("192.0.2.1", "198.51.100.7"), ["not-an-ip"])
+    assert untrusted_cfg == f"{UNTRUSTED_FORWARDED}:192.0.2.1"
 
 
 def test_rate_limiter_retry_after_peeks_without_counting() -> None:

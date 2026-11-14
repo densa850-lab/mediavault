@@ -136,3 +136,108 @@ def test_unmatched_logouts_are_rate_limited_per_ip(db_client: TestClient) -> Non
         res = c2.post("/api/v1/auth/logout", json={"refresh_token": tokens["refresh_token"]})
         assert res.status_code == 204
     assert sql("SELECT revoked_reason FROM auth_sessions")[0][0] == "logout"
+
+
+# ---------- MV-023 / MV-024 (Tester's re-gate): junk must never block real users ----------
+
+
+def _junk_refreshes(c: TestClient, n: int, headers: dict[str, str] | None = None) -> list[int]:
+    return [
+        c.post(
+            "/api/v1/auth/refresh", json={"refresh_token": f"junk-{i}"}, headers=headers or {}
+        ).status_code
+        for i in range(n)
+    ]
+
+
+def _junk_logouts(c: TestClient, n: int) -> list[int]:
+    return [
+        c.post("/api/v1/auth/logout", json={"refresh_token": f"junk-{i}"}).status_code
+        for i in range(n)
+    ]
+
+
+def test_valid_refresh_is_never_rate_limited_after_a_junk_flood(db_client: TestClient) -> None:
+    """Tester's MV-023 attack: 31+ junk refreshes from the same IP, then a real user refreshes."""
+    register(db_client, A)
+    with _client(auth_rate_limit_refresh_failures_per_ip=30) as c:
+        tokens = login(c, A)
+        codes = _junk_refreshes(c, 40)
+        assert codes[:30] == [401] * 30 and codes[30:] == [429] * 10, codes
+        for _ in range(5):
+            res = c.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+            assert res.status_code == 200, res.text
+            tokens = res.json()
+        # Junk is still limited afterwards: valid traffic didn't reset or share the bucket.
+        assert _junk_refreshes(c, 1) == [429]
+    assert sql("SELECT count(*) FROM auth_sessions WHERE revoked_at IS NOT NULL")[0][0] == 0
+
+
+def test_junk_with_forwarding_headers_cannot_block_another_clients_refresh(
+    db_client: TestClient,
+) -> None:
+    """Direct-API (Android) variant: junk carrying XFF from one client, valid refresh with XFF
+    from another client and from the same client."""
+    register(db_client, A)
+    with _client("203.0.113.60", auth_rate_limit_refresh_failures_per_ip=30) as attacker:
+        assert _junk_refreshes(attacker, 35, {"X-Forwarded-For": "6.6.6.6"})[-1] == 429
+        tokens = login(attacker, A)
+        same = attacker.post(
+            "/api/v1/auth/refresh",
+            json={"refresh_token": tokens["refresh_token"]},
+            headers={"X-Forwarded-For": "6.6.6.6"},
+        )
+        assert same.status_code == 200, same.text
+    with _client("203.0.113.61", auth_rate_limit_refresh_failures_per_ip=30) as victim:
+        victim.app.state.auth_rate_limiter = attacker.app.state.auth_rate_limiter  # type: ignore[attr-defined]
+        tokens = login(victim, A)
+        res = victim.post(
+            "/api/v1/auth/refresh",
+            json={"refresh_token": tokens["refresh_token"]},
+            headers={"X-Forwarded-For": "10.1.2.3"},
+        )
+        assert res.status_code == 200, res.text
+
+
+def test_real_logout_after_a_junk_flood_still_revokes(db_client: TestClient) -> None:
+    """Tester's MV-024 attack: 31+ junk logouts, then the real user signs out."""
+    register(db_client, A)
+    with _client(auth_rate_limit_refresh_failures_per_ip=30) as c:
+        tokens = login(c, A)
+        codes = _junk_logouts(c, 40)
+        assert codes[:30] == [204] * 30 and codes[30:] == [429] * 10, codes
+        res = c.post(
+            "/api/v1/auth/logout",
+            json={"refresh_token": tokens["refresh_token"]},
+            headers={"Authorization": f"Bearer {tokens['access_token']}"},
+        )
+        assert res.status_code == 204
+        me = c.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {tokens['access_token']}"})
+        assert me.status_code == 401
+        again = c.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+        assert again.status_code in (401, 429)
+    assert sql("SELECT revoked_reason FROM auth_sessions")[0][0] == "logout"
+
+
+def test_bearer_only_logout_after_a_junk_flood_still_revokes(db_client: TestClient) -> None:
+    register(db_client, A)
+    with _client(auth_rate_limit_refresh_failures_per_ip=5) as c:
+        tokens = login(c, A)
+        assert _junk_logouts(c, 10)[-1] == 429
+        res = c.post(
+            "/api/v1/auth/logout", headers={"Authorization": f"Bearer {tokens['access_token']}"}
+        )
+        assert res.status_code == 204
+    assert sql("SELECT revoked_reason FROM auth_sessions")[0][0] == "logout"
+
+
+def test_untrusted_forwarded_clients_do_not_share_one_login_bucket(db_client: TestClient) -> None:
+    """MV-025: one client exhausting its limit while sending XFF doesn't block other clients that
+    also (innocently) send XFF."""
+    with _client("203.0.113.70", auth_rate_limit_per_ip=3) as a:
+        codes = [_bad_login(a, i, {"X-Forwarded-For": f"198.51.100.{i}"}) for i in range(5)]
+        assert codes == [401, 401, 401, 429, 429], codes
+        limiter = a.app.state.auth_rate_limiter  # type: ignore[attr-defined]
+    with _client("203.0.113.71", auth_rate_limit_per_ip=3) as b:
+        b.app.state.auth_rate_limiter = limiter  # type: ignore[attr-defined]
+        assert _bad_login(b, 99, {"X-Forwarded-For": "192.0.2.50"}) == 401

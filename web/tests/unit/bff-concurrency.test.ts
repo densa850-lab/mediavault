@@ -184,7 +184,7 @@ describe("concurrent /api/auth/me", () => {
     expect(cookieValue(replay, REFRESH_COOKIE)).toBe("");
   });
 
-  it("an unreachable API during a shared refresh gives 502 to every waiter and keeps cookies", async () => {
+  it("an unreachable API during a shared refresh gives 503 (temporary) to every waiter and keeps cookies", async () => {
     let calls = 0;
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       if (String(url).endsWith("/auth/me")) return new Response("{}", { status: 401 });
@@ -194,7 +194,7 @@ describe("concurrent /api/auth/me", () => {
     });
     const cookies = { [ACCESS_COOKIE]: "acc-expired", [REFRESH_COOKIE]: "ref-x" };
     const [a, b] = await Promise.all([handleMe(meReq(cookies), fetchImpl), handleMe(meReq(cookies), fetchImpl)]);
-    expect([a.status, b.status]).toEqual([502, 502]);
+    expect([a.status, b.status]).toEqual([503, 503]);
     expect(calls).toBe(1);
     expect(a.headers.getSetCookie()).toEqual([]);
     expect(inflightRefreshCount()).toBe(0);

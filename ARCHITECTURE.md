@@ -86,7 +86,10 @@ right. Requests from other peers carrying either header share one rate-limit buc
 with `--no-proxy-headers`. The website builds upstream headers from scratch, never forwarding the
 browser's `X-Forwarded-For`, and sets `X-MediaVault-Client-IP` only from the hop appended by the
 `WEB_TRUSTED_PROXY_HOPS`-th reverse proxy in front of it. Login/register count every attempt;
-refresh and logout count only failures (`AUTH_RATE_LIMIT_REFRESH_FAILURES_PER_IP`). Auth responses
+refresh and logout count only failures (`AUTH_RATE_LIMIT_REFRESH_FAILURES_PER_IP`), and only after
+the token was checked: a valid refresh or a real logout is never limited (MV-023/024). Untrusted
+callers that send forwarding headers are keyed on their real peer (MV-025). Clients sign the user
+out only on a 401/422 from refresh; 429/5xx/network errors are temporary and keep the tokens. Auth responses
 carry `Cache-Control: no-store`; 422 bodies contain only `type`, `loc` and `msg`, never the
 submitted value.
 

@@ -351,3 +351,30 @@ def test_deployed_env_rejects_low_entropy_jwt_secret() -> None:
             jwt_secret="a" * 40,
         )
     assert "too weak" in str(exc.value) and "aaaa" not in str(exc.value)
+
+
+# ---------- MV-025: startup warning when no trusted proxy is configured in production ----------
+
+
+def _startup_output(capsys: pytest.CaptureFixture[str], **kw: object) -> str:
+    settings = _settings(
+        environment="production",
+        database_url=UNREACHABLE_DB_URL,
+        cors_allow_origins=[TRUSTED],
+        **kw,
+    )
+    with TestClient(create_app(settings)):
+        pass
+    return capsys.readouterr().out
+
+
+def test_production_without_trusted_proxies_warns_at_startup(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert "auth.no_trusted_proxies" in _startup_output(capsys)
+
+
+def test_production_with_trusted_proxies_does_not_warn(capsys: pytest.CaptureFixture[str]) -> None:
+    assert "auth.no_trusted_proxies" not in _startup_output(
+        capsys, auth_trusted_proxies=["10.0.0.5"]
+    )

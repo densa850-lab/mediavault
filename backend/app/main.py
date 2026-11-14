@@ -41,6 +41,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = create_engine(settings)
         app.state.sessionmaker = create_sessionmaker(app.state.engine)
         log.info("startup", environment=settings.environment, version=settings.app_version)
+        if settings.is_deployed and not settings.auth_trusted_proxies:
+            # MV-025: not an error (the API may serve only the Android app directly), but then
+            # every website user arrives from the website server's address and shares its bucket.
+            log.warning(
+                "auth.no_trusted_proxies",
+                hint="AUTH_TRUSTED_PROXIES is empty: requests relayed by the website share one "
+                "rate-limit bucket. Set it to the website server's address and set "
+                "WEB_TRUSTED_PROXY_HOPS on the website.",
+            )
         try:
             yield
         finally:

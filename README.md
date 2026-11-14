@@ -206,8 +206,12 @@ The backend refuses to start (`ConfigurationError`, no values echoed) when `ENVI
 Other auth settings (env): `ACCESS_TOKEN_TTL_S` (900), `REFRESH_TOKEN_TTL_S` (2592000),
 `REFRESH_REUSE_GRACE_S` (10, allowed 0 to 60; 0 = strict single use),
 `AUTH_RATE_LIMIT_PER_IP` (20), `AUTH_RATE_LIMIT_PER_EMAIL` (5), `AUTH_RATE_LIMIT_WINDOW_S` (60),
-`AUTH_RATE_LIMIT_REFRESH_FAILURES_PER_IP` (30: failed refreshes and logouts that name no session;
-successful ones never count) and `AUTH_TRUSTED_PROXIES`.
+`AUTH_RATE_LIMIT_REFRESH_FAILURES_PER_IP` (30: failed refreshes and logouts that name no session.
+The token is checked first, so a valid refresh or a logout of a real session is never limited;
+past the limit only invalid attempts get 429) and `AUTH_TRUSTED_PROXIES`.
+
+Clients treat only a 401 (or 422) on refresh as "signed out". 429, 5xx and network errors keep the
+tokens and show a retryable error, on the website and in the Android app.
 
 ### Client IP and rate limiting
 
@@ -220,10 +224,14 @@ successful ones never count) and `AUTH_TRUSTED_PROXIES`.
 * The website server never forwards the browser's `X-Forwarded-For` (the browser controls it). It
   sets `X-MediaVault-Client-IP` only when `WEB_TRUSTED_PROXY_HOPS` says how many reverse proxies
   in front of it append the client address (e.g. `1` for one nginx with
-  `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`). Unset/`0`: no client IP is sent
-  and all website traffic shares the website server's bucket. For production, put the website
-  behind a reverse proxy, set `WEB_TRUSTED_PROXY_HOPS` to the number of proxies and
-  `AUTH_TRUSTED_PROXIES` to the website server's address.
+  `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`).
+* **Default `WEB_TRUSTED_PROXY_HOPS=0` means ALL website users share ONE login/register bucket**
+  (20 attempts per minute for the whole site, per API process). Fine for local development; not
+  for production. In production the website logs a warning at startup when it is 0, and the API
+  logs `auth.no_trusted_proxies` when `AUTH_TRUSTED_PROXIES` is empty.
+* **Recommended production setting:** website behind one reverse proxy that appends the client
+  address, `WEB_TRUSTED_PROXY_HOPS=1` on the website, `AUTH_TRUSTED_PROXIES=<website server IP>`
+  on the API. See [DEPLOY.md](DEPLOY.md).
 
 On the website server set `API_INTERNAL_BASE_URL` to the API's internal address.
 
