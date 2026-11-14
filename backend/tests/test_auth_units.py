@@ -133,39 +133,134 @@ def test_token_issued_in_the_future_rejected() -> None:
         decode_access_token(tok, secret=SECRET, now=NOW)
 
 
-def _req(peer: str, xff: str | None = None):  # type: ignore[no-untyped-def]
+def _req(peer: str, xff: str | None = None, named: str | None = None):  # type: ignore[no-untyped-def]
     from starlette.requests import Request
 
     headers = [(b"x-forwarded-for", xff.encode())] if xff else []
+    if named is not None:
+        headers.append((b"x-mediavault-client-ip", named.encode()))
     return Request({"type": "http", "client": (peer, 1234), "headers": headers})
 
 
-def test_client_ip_ignores_x_forwarded_for_from_untrusted_peer() -> None:
+def test_client_ip_ignores_forwarding_headers_from_untrusted_peer() -> None:
+    from app.api.v1.auth import UNTRUSTED_FORWARDED, client_ip
+
+    assert client_ip(_req("203.0.113.9"), []) == "203.0.113.9"
+    # MV-016: an untrusted peer that claims an address is never believed, and every such request
+    # shares ONE bucket, whatever address it claims.
+    # MV-025: keyed on the real peer, not one global bucket other clients share.
+    keyed = f"{UNTRUSTED_FORWARDED}:203.0.113.9"
+    assert client_ip(_req("203.0.113.9", "1.2.3.4"), []) == keyed
+    assert client_ip(_req("203.0.113.9", "1.2.3.4"), ["10.0.0.5"]) == keyed
+    assert client_ip(_req("203.0.113.9", named="1.2.3.4"), ["10.0.0.5"]) == keyed
+    # Another untrusted client is in its own bucket.
+    assert client_ip(_req("203.0.113.10", "1.2.3.4"), []) == f"{UNTRUSTED_FORWARDED}:203.0.113.10"
+
+
+def test_client_ip_rotating_x_forwarded_for_maps_to_one_key() -> None:
     from app.api.v1.auth import client_ip
 
-    assert client_ip(_req("203.0.113.9", "1.2.3.4"), []) == "203.0.113.9"
-    assert client_ip(_req("203.0.113.9", "1.2.3.4"), ["10.0.0.5"]) == "203.0.113.9"
+    for trusted in ([], ["10.0.0.5"]):
+        keys = {client_ip(_req("127.0.0.1", f"198.51.100.{i}"), trusted) for i in range(50)}
+        assert len(keys) == 1, keys
+
+
+def test_client_ip_survives_uvicorn_proxy_header_rewriting() -> None:
+    """If uvicorn runs WITH proxy headers (its default trusts 127.0.0.1), it replaces the peer
+    with the X-Forwarded-For address before the app sees it. Rotating XFF from loopback then looks
+    like many different peers; they must still share one bucket (MV-016)."""
+    from app.api.v1.auth import client_ip
+
+    keys = {client_ip(_req(f"198.51.100.{i}", f"198.51.100.{i}"), []) for i in range(50)}
+    assert len(keys) == 1, keys
+    # uvicorn picks the right-most UNtrusted hop, so "X, 127.0.0.1" rewrites the peer to X.
+    keys = {client_ip(_req(f"198.51.100.{i}", f"198.51.100.{i}, 127.0.0.1"), []) for i in range(50)}
+    assert len(keys) == 1, keys
 
 
 def test_client_ip_uses_x_forwarded_for_from_trusted_proxy() -> None:
     from app.api.v1.auth import client_ip
 
     assert client_ip(_req("10.0.0.5", "198.51.100.7"), ["10.0.0.5"]) == "198.51.100.7"
-    # A client-supplied spoofed left-most hop is ignored; the right-most untrusted hop wins.
+    # Only the right-most untrusted hop counts; the client-controlled left part is ignored.
     assert client_ip(_req("10.0.0.5", "6.6.6.6, 198.51.100.7"), ["10.0.0.5"]) == "198.51.100.7"
     assert client_ip(_req("10.0.0.5"), ["10.0.0.5"]) == "10.0.0.5"
 
 
-def test_client_ip_trusted_proxies_accept_cidr_ranges() -> None:
+def test_client_ip_header_from_trusted_proxy_wins_over_x_forwarded_for() -> None:
     from app.api.v1.auth import client_ip
 
-    trusted = ["10.0.0.0/8", "not-an-ip"]
+    trusted = ["127.0.0.1"]
+    req = _req("127.0.0.1", "6.6.6.6", named="198.51.100.7")
+    assert client_ip(req, trusted) == "198.51.100.7"
+    # A malformed header is ignored (falls back to XFF / peer), never used as a key verbatim.
+    assert client_ip(_req("127.0.0.1", named="not-an-ip"), trusted) == "127.0.0.1"
+    assert client_ip(_req("127.0.0.1", named="2001:db8::1"), trusted) == "2001:db8::1"
+
+
+def test_client_ip_trusted_proxies_accept_cidr_ranges() -> None:
+    from app.api.v1.auth import UNTRUSTED_FORWARDED, client_ip
+
+    trusted = ["10.0.0.0/8"]
     assert client_ip(_req("10.1.2.3", "198.51.100.7"), trusted) == "198.51.100.7"
-    # Hops inside the trusted range are skipped from the right.
+    # Trusted hops inside the chain are skipped.
     assert client_ip(_req("10.1.2.3", "198.51.100.7, 10.9.9.9"), trusted) == "198.51.100.7"
-    # A peer outside the range cannot spoof, and a malformed entry never trusts anything.
-    assert client_ip(_req("192.0.2.1", "198.51.100.7"), trusted) == "192.0.2.1"
-    assert client_ip(_req("192.0.2.1", "198.51.100.7"), ["not-an-ip"]) == "192.0.2.1"
+    # Peers outside the range are not trusted.
+    assert (
+        client_ip(_req("192.0.2.1", "198.51.100.7"), trusted) == f"{UNTRUSTED_FORWARDED}:192.0.2.1"
+    )
+    untrusted_cfg = client_ip(_req("192.0.2.1", "198.51.100.7"), ["not-an-ip"])
+    assert untrusted_cfg == f"{UNTRUSTED_FORWARDED}:192.0.2.1"
+
+
+def test_rate_limiter_retry_after_peeks_without_counting() -> None:
+    t = [1000.0]
+    rl = FixedWindowRateLimiter(lambda: t[0])
+    for _ in range(10):
+        assert rl.retry_after("k", limit=2, window_s=60) is None
+    rl.hit("k", limit=2, window_s=60)
+    assert rl.retry_after("k", limit=2, window_s=60) is None
+    rl.hit("k", limit=2, window_s=60)
+    retry = rl.retry_after("k", limit=2, window_s=60)
+    assert retry is not None and 1 <= retry <= 60
+    t[0] += 60
+    assert rl.retry_after("k", limit=2, window_s=60) is None
+
+
+def _used(seconds_ago: float):  # type: ignore[no-untyped-def]
+    from app.models import RefreshToken
+
+    return RefreshToken(used_at=NOW - timedelta(seconds=seconds_ago))
+
+
+@pytest.mark.parametrize(
+    ("used_seconds_ago", "within"),
+    [
+        (0, True),
+        (5, True),
+        (10, True),
+        (10.001, False),
+        # MV-015: the losing racer read its clock BEFORE the winner rotated (negative age).
+        (-0.000001, True),
+        (-0.25, True),
+        (-5, True),
+        (-5.001, False),
+        (-3600, False),
+    ],
+)
+def test_within_grace_tolerates_small_negative_age(used_seconds_ago: float, within: bool) -> None:
+    from app.auth.service import _within_grace
+
+    settings = make_settings(refresh_reuse_grace_s=10)
+    assert _within_grace(_used(used_seconds_ago), settings=settings, now=NOW) is within
+
+
+def test_within_grace_zero_disables_even_for_racers() -> None:
+    from app.auth.service import _within_grace
+
+    settings = make_settings(refresh_reuse_grace_s=0)
+    assert _within_grace(_used(-0.1), settings=settings, now=NOW) is False
+    assert _within_grace(_used(0), settings=settings, now=NOW) is False
 
 
 def test_successor_derivation_requires_the_predecessor_token_and_nonce() -> None:

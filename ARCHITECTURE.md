@@ -72,6 +72,27 @@ Strict single use would treat the second one as theft and log the user out. The 
    token; logout waits for an in-flight refresh and revokes the newest pair; a rejected refresh
    clears the credentials.
 
+Clock read vs. lock (MV-015, Tester's QA): each request reads the clock when it starts, before it
+waits for the session lock, so a racer that started a moment before the winner sees the winner's
+`used_at` slightly in its own future. Such a negative age (down to `-5 s`, `MAX_RACE_CLOCK_SKEW_S`)
+counts as age 0, i.e. concurrent. It cannot widen the window: the upper bound is still
+`REFRESH_REUSE_GRACE_S` and a "now" further in the past is still a replay.
+
+### Client IP for rate limits (MV-016, Tester's QA)
+
+The API only believes a client address from peers listed in `AUTH_TRUSTED_PROXIES` (normally the
+website server), via `X-MediaVault-Client-IP` (preferred) or `X-Forwarded-For` walked from the
+right. Requests from other peers carrying either header share one rate-limit bucket. uvicorn runs
+with `--no-proxy-headers`. The website builds upstream headers from scratch, never forwarding the
+browser's `X-Forwarded-For`, and sets `X-MediaVault-Client-IP` only from the hop appended by the
+`WEB_TRUSTED_PROXY_HOPS`-th reverse proxy in front of it. Login/register count every attempt;
+refresh and logout count only failures (`AUTH_RATE_LIMIT_REFRESH_FAILURES_PER_IP`), and only after
+the token was checked: a valid refresh or a real logout is never limited (MV-023/024). Untrusted
+callers that send forwarding headers are keyed on their real peer (MV-025). Clients sign the user
+out only on a 401/422 from refresh; 429/5xx/network errors are temporary and keep the tokens. Auth responses
+carry `Cache-Control: no-store`; 422 bodies contain only `type`, `loc` and `msg`, never the
+submitted value.
+
 Threat model and trade-off: an attacker who steals T and presents it within the grace window,
 before the legitimate client uses S, receives the same S as the client (not a separate branch).
 That is no worse than stealing T a moment earlier, which strict rotation also cannot stop. As soon

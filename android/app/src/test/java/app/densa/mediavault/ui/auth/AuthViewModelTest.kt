@@ -98,10 +98,15 @@ class AuthViewModelTest {
     }
 
     @Test
-    fun serverUnavailable_showsSignedOutWithError() = runTest(dispatcher) {
+    fun serverUnavailable_isRetryable_notSignedOut() = runTest(dispatcher) {
         val repo = FakeRepo().apply { session = SessionState.Unavailable("down") }
         val vm = AuthViewModel(repo)
         advanceUntilIdle()
-        assertEquals(AuthUiState.SignedOut(error = "down"), vm.state.value)
+        assertEquals(AuthUiState.Unavailable("down"), vm.state.value)
+        // Retry once the server is back: the kept session is still there.
+        repo.session = SessionState.SignedIn(app.densa.mediavault.data.auth.UserDto("u1", "a@example.com"))
+        vm.loadSession()
+        advanceUntilIdle()
+        assertEquals(AuthUiState.SignedIn("a@example.com"), vm.state.value)
     }
 }

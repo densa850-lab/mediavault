@@ -120,12 +120,19 @@ async def _revoke(db: AsyncSession, session_id: uuid.UUID, *, reason: str, now: 
     )
 
 
+# Each request reads the clock when it starts, BEFORE it waits for the session lock. A racer that
+# started a moment before the winner therefore sees the winner's `used_at` slightly in its future
+# (negative age, MV-015). Such a request is concurrent by definition, so a small negative age is
+# treated as age 0. Bounded so a badly skewed clock can't widen the grace.
+MAX_RACE_CLOCK_SKEW_S = 5.0
+
+
 def _within_grace(token: RefreshToken, *, settings: Settings, now: datetime) -> bool:
     grace = settings.refresh_reuse_grace_s
     if grace <= 0 or token.used_at is None:
         return False
     age = (now - token.used_at).total_seconds()
-    return 0 <= age <= grace
+    return -MAX_RACE_CLOCK_SKEW_S <= age <= grace
 
 
 async def _grace_successor(
@@ -249,7 +256,8 @@ async def logout(
     refresh_token: str | None,
     session_id: uuid.UUID | None,
     now: datetime,
-) -> None:
+) -> bool:
+    """Revoke the named session(s). Returns False when nothing valid was named."""
     ids: set[uuid.UUID] = set()
     if session_id is not None:
         ids.add(session_id)
@@ -266,3 +274,4 @@ async def logout(
     for sid in ids:
         await _revoke(db, sid, reason="logout", now=now)
     await db.commit()
+    return bool(ids)

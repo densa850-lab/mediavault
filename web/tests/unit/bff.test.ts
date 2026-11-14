@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ACCESS_COOKIE,
+  CLIENT_IP_HEADER,
   REFRESH_COOKIE,
   handleLogin,
   handleLogout,
@@ -10,6 +11,7 @@ import {
   isSameOrigin,
   readCookie,
   serializeCookie,
+  trustedClientIp,
 } from "@/lib/auth/bff";
 
 const SITE = "http://localhost:3000";
@@ -196,10 +198,72 @@ describe("logout", () => {
     expect(setCookies(res).every((c) => c.includes("Max-Age=0"))).toBe(true);
   });
 
-  it("still clears cookies when the API is down", async () => {
+  it("still clears cookies when the API is down, but says the revoke was not confirmed", async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new TypeError("down"));
     const res = await handleLogout(req("/api/auth/logout", { cookie: `${REFRESH_COOKIE}=ref-1` }), fetchImpl);
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(502);
+    expect((await res.json()).detail).toMatch(/did not confirm/);
     expect(setCookies(res)).toHaveLength(2);
+    expect(setCookies(res).every((c) => c.includes("Max-Age=0"))).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(2); // retried once
+  });
+});
+
+describe("client IP forwarding (MV-016)", () => {
+  const body = { email: "a@example.com", password: "long-enough-pw" };
+  function withHeaders(extra: Record<string, string>) {
+    const r = req("/api/auth/login", { body });
+    const headers = new Headers(r.headers);
+    for (const [k, v] of Object.entries(extra)) headers.set(k, v);
+    return new Request(r.url, { method: "POST", headers, body: JSON.stringify(body) });
+  }
+  async function sentHeaders(extra: Record<string, string>): Promise<Headers> {
+    const fetchImpl = vi.fn().mockResolvedValue(api(200, tokens));
+    await handleLogin(withHeaders(extra), fetchImpl);
+    return fetchImpl.mock.calls[0][1].headers as Headers;
+  }
+
+  it("never forwards the browser's X-Forwarded-For or client-IP header", async () => {
+    const sent = await sentHeaders({ "x-forwarded-for": "6.6.6.6", "x-mediavault-client-ip": "7.7.7.7" });
+    expect(sent.get("x-forwarded-for")).toBeNull();
+    expect(sent.get("x-mediavault-client-ip")).toBeNull();
+  });
+
+  it("by default sends no client IP, so rotating X-Forwarded-For changes nothing", async () => {
+    const seen = new Set<string | null>();
+    for (let i = 0; i < 5; i++) {
+      const sent = await sentHeaders({ "x-forwarded-for": `198.51.100.${i}` });
+      seen.add(sent.get(CLIENT_IP_HEADER));
+      expect(sent.get("x-forwarded-for")).toBeNull();
+    }
+    expect([...seen]).toEqual([null]);
+  });
+
+  it("with WEB_TRUSTED_PROXY_HOPS=1 sends only the proxy-appended (right-most) address", async () => {
+    vi.stubEnv("WEB_TRUSTED_PROXY_HOPS", "1");
+    const sent = await sentHeaders({
+      "x-forwarded-for": "6.6.6.6, 198.51.100.7",
+      "x-mediavault-client-ip": "7.7.7.7",
+    });
+    expect(sent.get(CLIENT_IP_HEADER)).toBe("198.51.100.7");
+    expect(sent.get("x-forwarded-for")).toBeNull();
+  });
+
+  it("with two trusted hops takes the second address from the right", () => {
+    vi.stubEnv("WEB_TRUSTED_PROXY_HOPS", "2");
+    const r = withHeaders({ "x-forwarded-for": "6.6.6.6, 198.51.100.7, 10.0.0.2" });
+    expect(trustedClientIp(r)).toBe("198.51.100.7");
+    expect(trustedClientIp(withHeaders({ "x-forwarded-for": "10.0.0.2" }))).toBeUndefined();
+  });
+
+  it("ignores malformed values and bad configuration", () => {
+    vi.stubEnv("WEB_TRUSTED_PROXY_HOPS", "1");
+    expect(trustedClientIp(withHeaders({ "x-forwarded-for": "not-an-ip" }))).toBeUndefined();
+    expect(trustedClientIp(withHeaders({ "x-forwarded-for": "2001:db8::1" }))).toBe("2001:db8::1");
+    expect(trustedClientIp(withHeaders({}))).toBeUndefined();
+    vi.stubEnv("WEB_TRUSTED_PROXY_HOPS", "abc");
+    expect(trustedClientIp(withHeaders({ "x-forwarded-for": "198.51.100.7" }))).toBeUndefined();
+    vi.stubEnv("WEB_TRUSTED_PROXY_HOPS", "0");
+    expect(trustedClientIp(withHeaders({ "x-forwarded-for": "198.51.100.7" }))).toBeUndefined();
   });
 });

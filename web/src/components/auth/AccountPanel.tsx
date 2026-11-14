@@ -8,11 +8,13 @@ import { fetchCurrentUser, signOut, type CurrentUser } from "@/lib/auth/client";
 type State =
   | { kind: "loading" }
   | { kind: "signed-in"; user: CurrentUser }
-  | { kind: "signed-out" }
+  | { kind: "signed-out"; warning?: string }
   | { kind: "error"; message: string };
 
 export function AccountPanel() {
   const [state, setState] = useState<State>({ kind: "loading" });
+
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -24,22 +26,35 @@ export function AccountPanel() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [attempt]);
+
+  function retry() {
+    setState({ kind: "loading" });
+    setAttempt((n) => n + 1);
+  }
 
   async function onSignOut() {
-    await signOut().catch(() => undefined);
-    setState({ kind: "signed-out" });
+    const result = await signOut();
+    setState(result.confirmed ? { kind: "signed-out" } : { kind: "signed-out", warning: result.message });
   }
 
   switch (state.kind) {
     case "loading":
       return <p>Checking your session…</p>;
     case "error":
-      return <p role="alert">{state.message}</p>;
+      return (
+        <div className="flex flex-col items-start gap-2">
+          <p role="alert">{state.message}</p>
+          <button type="button" onClick={retry} className="rounded border border-slate-300 px-4 py-2">
+            Try again
+          </button>
+        </div>
+      );
     case "signed-out":
       return (
         <div className="flex flex-col gap-2">
           <p>You are signed out.</p>
+          {state.warning ? <p role="alert">{state.warning}</p> : null}
           <Link href="/login" className="text-blue-600 underline">
             Sign in
           </Link>

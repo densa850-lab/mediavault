@@ -26,6 +26,8 @@ _LOCAL_DEV_DATABASE_URL = "postgresql+psycopg://mediavault:mediavault@localhost:
 # Publicly known, development/test only. Staging/production refuse it (see validator below).
 _DEV_ONLY_JWT_SECRET = "dev-only-insecure-jwt-secret-not-for-deployment"  # noqa: S105
 MIN_JWT_SECRET_LENGTH = 32
+# Rejects obviously non-random secrets such as 32 x "a".
+MIN_JWT_SECRET_DISTINCT_CHARS = 10
 
 
 class ConfigurationError(RuntimeError):
@@ -63,7 +65,9 @@ class Settings(BaseSettings):
 
     app_name: str = "mediavault-api"
     app_version: str = "0.1.0"
-    environment: Environment = "development"
+    # REQUIRED (MV-018): there is no default. An unset ENVIRONMENT refuses to start instead of
+    # silently picking development defaults (dev JWT secret, local database credentials).
+    environment: Environment | None = None
     log_level: str = "INFO"
 
     # Format: postgresql+psycopg://USER:PASSWORD@HOST:PORT/DBNAME
@@ -86,7 +90,12 @@ class Settings(BaseSettings):
     auth_rate_limit_window_s: int = 60
     # Peers (e.g. the website's server) allowed to pass the real client IP in X-Forwarded-For.
     # Comma-separated exact IPs. Empty = never trust X-Forwarded-For.
+    # Comma-separated exact IPs or CIDRs. Only these peers may name the client IP, via
+    # X-MediaVault-Client-IP (set by the website server) or X-Forwarded-For. Empty = trust nobody.
     auth_trusted_proxies: Annotated[list[str], NoDecode] = []
+    # Failed /auth/refresh and unmatched /auth/logout attempts per client IP per window (MV-021).
+    # Only failures count, so normal refreshes never hit it.
+    auth_rate_limit_refresh_failures_per_ip: int = 30
 
     # Comma-separated exact origins allowed to call the API from a browser.
     cors_allow_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
@@ -102,6 +111,11 @@ class Settings(BaseSettings):
     def _check_deployed_environment(self) -> "Settings":
         # ConfigurationError is not a ValueError, so pydantic re-raises it unchanged (no input
         # values attached).
+        if self.environment is None:
+            raise ConfigurationError(
+                "ENVIRONMENT must be set explicitly (development, test, staging or production); "
+                "nothing is assumed when it is unset."
+            )
         if self.environment in DEPLOYED_ENVIRONMENTS:
             if not (self.database_url and self.database_url.strip()):
                 raise ConfigurationError(
@@ -126,12 +140,22 @@ class Settings(BaseSettings):
                     f"JWT_SECRET is too short for ENVIRONMENT={self.environment}: "
                     f"at least {MIN_JWT_SECRET_LENGTH} characters are required."
                 )
+            if len(set(secret)) < MIN_JWT_SECRET_DISTINCT_CHARS:
+                raise ConfigurationError(
+                    f"JWT_SECRET is too weak for ENVIRONMENT={self.environment}: use a random "
+                    "value (e.g. python -c 'import secrets; print(secrets.token_urlsafe(48))')."
+                )
         else:
             if not self.database_url:
                 self.database_url = _LOCAL_DEV_DATABASE_URL
             if not self.jwt_secret:
                 self.jwt_secret = _DEV_ONLY_JWT_SECRET
         return self
+
+    @property
+    def environment_name(self) -> str:
+        assert self.environment is not None
+        return self.environment
 
     @property
     def is_deployed(self) -> bool:

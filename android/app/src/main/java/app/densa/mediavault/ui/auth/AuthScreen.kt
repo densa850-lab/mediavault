@@ -45,6 +45,7 @@ fun AuthRoute(viewModel: AuthViewModel, onBack: () -> Unit) {
         onSubmit = viewModel::submit,
         onModeChange = viewModel::setMode,
         onLogout = viewModel::logout,
+        onRetry = viewModel::loadSession,
     )
 }
 
@@ -56,6 +57,7 @@ fun AuthScreen(
     onSubmit: (email: String, password: String) -> Unit,
     onModeChange: (AuthMode) -> Unit,
     onLogout: () -> Unit,
+    onRetry: () -> Unit = {},
 ) {
     Scaffold(
         topBar = {
@@ -84,6 +86,12 @@ fun AuthScreen(
                     OutlinedButton(onClick = onLogout) { Text(stringResource(R.string.action_sign_out)) }
                 }
                 is AuthUiState.SignedOut -> AuthForm(state, onSubmit, onModeChange)
+                is AuthUiState.Unavailable -> {
+                    Text(state.message, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("auth_unavailable"))
+                    Button(onClick = onRetry, modifier = Modifier.testTag("auth_retry")) {
+                        Text(stringResource(R.string.action_retry_session))
+                    }
+                }
             }
         }
     }
