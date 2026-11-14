@@ -18,6 +18,19 @@
   `REFRESH_REUSE_GRACE_S`, default 10 s) returning the same derived successor; website single-flight
   refresh; Android `Mutex`-coordinated refresh/logout.
 
+* QA fixes (Tester's report on PR #2 at 0d065bb):
+  * MV-015: concurrent refresh no longer revokes when the losing racer's clock was read a moment
+    before the winner's (bounded 5 s negative-age tolerance); stress script
+    `backend/scripts/stress_refresh_races.py`.
+  * MV-016: `X-Forwarded-For` / `X-MediaVault-Client-IP` trusted only from `AUTH_TRUSTED_PROXIES`;
+    untrusted forwarded requests share one bucket; website stops forwarding the browser's XFF and
+    sets `X-MediaVault-Client-IP` only with `WEB_TRUSTED_PROXY_HOPS`; run uvicorn with
+    `--no-proxy-headers`.
+  * MV-018: `ENVIRONMENT` is required (no silent development default); low-entropy `JWT_SECRET`
+    refused in staging/production.
+  * MV-019: validation errors no longer echo submitted values. MV-020: `Cache-Control: no-store`
+    on auth responses. MV-021: failed refresh and unmatched logout attempts are rate limited per IP.
+
 ## Unreleased: Phase 1 remediation (no new features)
 
 * MV-001: staging/production refuse to start without `DATABASE_URL`; no default credentials there.

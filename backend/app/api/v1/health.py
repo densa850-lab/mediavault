@@ -50,7 +50,7 @@ async def health(request: Request, response: Response) -> HealthResponse:
         status="ok" if healthy else "degraded",
         service=settings.app_name,
         version=settings.app_version,
-        environment=settings.environment,
+        environment=settings.environment_name,
         checks=HealthChecks(database=db_state),
         time=datetime.now(UTC),
     )

@@ -4,7 +4,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_router
 from app.auth.rate_limit import FixedWindowRateLimiter
@@ -12,6 +15,20 @@ from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, log
 from app.core.security import SecurityHeadersMiddleware, StrictCORSMiddleware
 from app.db.session import create_engine, create_sessionmaker
+
+
+def _safe_validation_errors(exc: RequestValidationError) -> list[dict[str, object]]:
+    """Validation errors WITHOUT the submitted values (MV-019: never echo a password back)."""
+    return [{k: v for k, v in err.items() if k in ("type", "loc", "msg")} for err in exc.errors()]
+
+
+async def _validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, RequestValidationError)
+    return JSONResponse(
+        status_code=422,
+        content={"detail": jsonable_encoder(_safe_validation_errors(exc))},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -51,6 +68,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
     )
+    app.add_exception_handler(RequestValidationError, _validation_error_handler)
     app.include_router(api_router)
     return app
 

@@ -56,6 +56,15 @@ session lock, and 8) keep the session and return one successor; replay after the
 sessions unaffected; website overlapping `/api/auth/me` share one refresh with identical cookies;
 Android overlapping `currentSession()` share one refresh, logout waits and leaves no credentials.
 
+QA fixes (Tester's report on 0d065bb): MV-015 racers with different and unsynchronised clocks
+(deterministic earlier-clock loser, mixed offsets under a held lock, 25 two-way + 8 five-way real
+races per CI run, bounded skew still revokes); `scripts/stress_refresh_races.py` runs 100+ two-way
+and 20+ five-way HTTP races against a live API and fails on any revocation. MV-016 rotating
+`X-Forwarded-For` / `X-MediaVault-Client-IP` from untrusted peers (one bucket, also when uvicorn
+rewrote the peer), trusted website header per client; website never forwards the browser's XFF.
+MV-018 unset `ENVIRONMENT` refuses to start; MV-019 422 bodies never echo the password; MV-020
+`no-store` on token responses; MV-021 failed refresh / unmatched logout limits.
+
 Still not verified: the R8-minified release build was built but not run on a device, so Tink under
 R8 relies on its bundled keep rules; the in-memory rate limiter is per process.
 

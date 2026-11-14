@@ -101,10 +101,43 @@ export function clearCookies(): string[] {
   ];
 }
 
+/** Header the website server sets (never forwards) so the API can rate-limit per real client. */
+export const CLIENT_IP_HEADER = "X-MediaVault-Client-IP";
+
+const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+const IPV6 = /^[0-9a-fA-F:.]{2,45}$/;
+
+function looksLikeIp(value: string): boolean {
+  return IPV4.test(value) || (value.includes(":") && IPV6.test(value));
+}
+
+/**
+ * The browser's IP, ONLY when it can be trusted (MV-016).
+ *
+ * The browser controls X-Forwarded-For: Next.js passes a client-supplied value through unchanged
+ * and only fills in the socket address when the header is absent. So it is used only when
+ * WEB_TRUSTED_PROXY_HOPS says how many reverse proxies in front of this server APPEND the address
+ * they saw (e.g. 1 for one nginx with $proxy_add_x_forwarded_for). The client is then the
+ * WEB_TRUSTED_PROXY_HOPS-th entry from the right; everything further left is client-controlled.
+ * Unset/0 (the default): no client IP is sent and the API rate-limits on this server's address.
+ */
+export function trustedClientIp(req: Request): string | undefined {
+  const hops = Number(process.env.WEB_TRUSTED_PROXY_HOPS?.trim() || "0");
+  if (!Number.isInteger(hops) || hops < 1 || hops > 10) return undefined;
+  const chain = (req.headers.get("x-forwarded-for") ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (chain.length < hops) return undefined;
+  const candidate = chain[chain.length - hops];
+  return looksLikeIp(candidate) ? candidate : undefined;
+}
+
 function forwardHeaders(req: Request, extra: Record<string, string> = {}): Headers {
+  // Built from scratch: no browser header (X-Forwarded-For, X-MediaVault-Client-IP, ...) is copied.
   const h = new Headers({ "Content-Type": "application/json", Accept: "application/json", ...extra });
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) h.set("X-Forwarded-For", xff);
+  const ip = trustedClientIp(req);
+  if (ip) h.set(CLIENT_IP_HEADER, ip);
   return h;
 }
 

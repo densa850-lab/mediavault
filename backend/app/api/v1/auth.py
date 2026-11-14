@@ -86,17 +86,81 @@ def _is_trusted(host: str, trusted_proxies: list[str]) -> bool:
     return False
 
 
+CLIENT_IP_HEADER = "x-mediavault-client-ip"
+# Rate-limit bucket for requests that carry forwarding headers from a peer we don't trust. Their
+# claimed address can't be believed (and uvicorn's proxy-header rewriting, if someone left it on,
+# may already have replaced the peer address with it), so they all share one bucket (MV-016).
+UNTRUSTED_FORWARDED = "untrusted-forwarded"
+
+
+def _valid_ip(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return str(ipaddress.ip_address(value.strip()))
+    except ValueError:
+        return None
+
+
 def client_ip(request: Request, trusted_proxies: list[str]) -> str:
-    """The caller's IP. X-Forwarded-For is honoured only when the direct peer is trusted."""
+    """The caller's IP for rate limiting.
+
+    * Peer in AUTH_TRUSTED_PROXIES (e.g. the website server): its X-MediaVault-Client-IP header
+      (which the website overwrites, never forwards) wins; otherwise X-Forwarded-For, walking
+      from the right past trusted hops; otherwise the peer itself.
+    * Any other peer: forwarding headers are never believed. If it sends X-Forwarded-For or
+      X-MediaVault-Client-IP anyway, it lands in one shared bucket, so rotating fake addresses
+      can't multiply its allowance.
+    """
     peer = request.client.host if request.client else "unknown"
+    xff = request.headers.get("x-forwarded-for", "")
+    named = request.headers.get(CLIENT_IP_HEADER)
     if not _is_trusted(peer, trusted_proxies):
-        return peer
-    hops = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
-    # Walk from the right: the first hop that is not one of our proxies is the client.
+        return UNTRUSTED_FORWARDED if (xff.strip() or named) else peer
+    from_header = _valid_ip(named)
+    if from_header:
+        return from_header
+    hops = [h.strip() for h in xff.split(",") if h.strip()]
     for hop in reversed(hops):
         if not _is_trusted(hop, trusted_proxies):
-            return hop
+            return _valid_ip(hop) or UNTRUSTED_FORWARDED
     return peer
+
+
+def _too_many(retry: float) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="Too many attempts. Try again later.",
+        headers={"Retry-After": str(int(retry))},
+    )
+
+
+def _failure_key(request: Request, settings: AppSettings, scope: str) -> str:
+    return f"{scope}-fail:ip:{client_ip(request, settings.auth_trusted_proxies)}"
+
+
+def _check_failures(request: Request, settings: AppSettings, scope: str) -> None:
+    retry = request.app.state.auth_rate_limiter.retry_after(
+        _failure_key(request, settings, scope),
+        limit=settings.auth_rate_limit_refresh_failures_per_ip,
+        window_s=settings.auth_rate_limit_window_s,
+    )
+    if retry is not None:
+        raise _too_many(retry)
+
+
+def _count_failure(request: Request, settings: AppSettings, scope: str) -> None:
+    request.app.state.auth_rate_limiter.hit(
+        _failure_key(request, settings, scope),
+        limit=settings.auth_rate_limit_refresh_failures_per_ip,
+        window_s=settings.auth_rate_limit_window_s,
+    )
+
+
+def no_store(response: Response) -> None:
+    """Token-bearing responses must never be cached (RFC 6749 section 5.1, MV-020)."""
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
 
 
 def _rate_limit(request: Request, settings: AppSettings, scope: str, email: str | None) -> None:
@@ -108,11 +172,7 @@ def _rate_limit(request: Request, settings: AppSettings, scope: str, email: str 
         key = f"{scope}:email:{service.normalize_email(email)}"
         retry = limiter.hit(key, limit=settings.auth_rate_limit_per_email, window_s=window)
     if retry is not None:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many attempts. Try again later.",
-            headers={"Retry-After": str(int(retry))},
-        )
+        raise _too_many(retry)
 
 
 def _tokens(pair: service.TokenPair) -> TokenResponse:
@@ -133,7 +193,7 @@ async def register(
     return MessageResponse(detail=REGISTER_ACCEPTED)
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=TokenResponse, dependencies=[Depends(no_store)])
 async def login(
     body: LoginRequest, request: Request, db: DbSession, settings: AppSettings, now: Now
 ) -> TokenResponse:
@@ -145,19 +205,22 @@ async def login(
     return _tokens(await service.start_session(db, user, settings=settings, now=now))
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post("/refresh", response_model=TokenResponse, dependencies=[Depends(no_store)])
 async def refresh(
-    body: RefreshRequest, db: DbSession, settings: AppSettings, now: Now
+    body: RefreshRequest, request: Request, db: DbSession, settings: AppSettings, now: Now
 ) -> TokenResponse:
+    _check_failures(request, settings, "refresh")
     try:
         pair = await service.rotate(db, body.refresh_token, settings=settings, now=now)
     except service.AuthError:
+        _count_failure(request, settings, "refresh")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=INVALID_REFRESH) from None
     return _tokens(pair)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
+    request: Request,
     db: DbSession,
     settings: AppSettings,
     now: Now,
@@ -166,7 +229,11 @@ async def logout(
         HTTPAuthorizationCredentials | None, Depends(HTTPBearer(auto_error=False))
     ] = None,
 ) -> Response:
-    """Revoke the session named by the refresh token and/or the bearer token. Always 204."""
+    """Revoke the session named by the refresh token and/or the bearer token.
+
+    Always 204, except 429 once a client keeps sending logouts that name no session (MV-021).
+    """
+    _check_failures(request, settings, "logout")
     session_id = None
     if credentials is not None:
         try:
@@ -176,16 +243,18 @@ async def logout(
             session_id = claims.session_id
         except InvalidTokenError:
             pass
-    await service.logout(
+    matched = await service.logout(
         db,
         refresh_token=body.refresh_token if body else None,
         session_id=session_id,
         now=now,
     )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    if not matched:
+        _count_failure(request, settings, "logout")
+    return Response(status_code=status.HTTP_204_NO_CONTENT, headers={"Cache-Control": "no-store"})
 
 
-@router.get("/me", response_model=UserResponse)
+@router.get("/me", response_model=UserResponse, dependencies=[Depends(no_store)])
 async def me(user: CurrentUser) -> UserResponse:
     return UserResponse(
         id=user.id, email=user.email, is_active=user.is_active, created_at=user.created_at
