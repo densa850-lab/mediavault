@@ -22,6 +22,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -47,12 +48,18 @@ import app.densa.mediavault.ui.theme.MediaVaultTheme
 import app.densa.mediavault.ui.theme.Navy
 
 @Composable
-fun HomeRoute(viewModel: HomeViewModel, serverUrl: String, showErrorReason: Boolean) {
+fun HomeRoute(
+    viewModel: HomeViewModel,
+    serverUrl: String,
+    showErrorReason: Boolean,
+    onAccountClick: (() -> Unit)? = null,
+) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     HomeScreen(
         state = state,
         serverUrl = serverUrl,
         showErrorReason = showErrorReason,
+        onAccountClick = onAccountClick,
         onRetry = viewModel::refresh,
     )
 }
@@ -63,6 +70,7 @@ fun HomeScreen(
     state: HomeUiState,
     serverUrl: String,
     showErrorReason: Boolean = false,
+    onAccountClick: (() -> Unit)? = null,
     onRetry: () -> Unit,
 ) {
     Scaffold(
@@ -73,6 +81,13 @@ fun HomeScreen(
                         LogoMark(Modifier.size(28.dp))
                         Spacer(Modifier.size(8.dp))
                         Text(stringResource(R.string.app_name), fontWeight = FontWeight.SemiBold)
+                    }
+                },
+                actions = {
+                    if (onAccountClick != null) {
+                        TextButton(onClick = onAccountClick) {
+                            Text(stringResource(R.string.action_account), color = Color.White)
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(

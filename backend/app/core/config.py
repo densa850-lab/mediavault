@@ -5,6 +5,7 @@ Never hard-code secrets here. Real values belong in each environment's secret st
 Deployed environments (staging, production) are strict:
 - DATABASE_URL is required. There is no built-in fallback (MV-001).
 - CORS origins must be explicit https:// origins. "*" and http:// are rejected (MV-002).
+- JWT_SECRET is required and must be at least 32 characters. The dev/test default is refused.
 A misconfiguration raises ConfigurationError at startup with a message that never contains
 the database URL, credentials or any other configured value.
 """
@@ -13,7 +14,7 @@ from functools import lru_cache
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 Environment = Literal["development", "test", "staging", "production"]
@@ -22,6 +23,11 @@ DEPLOYED_ENVIRONMENTS: frozenset[str] = frozenset({"staging", "production"})
 # Local-only default for development/test (matches infrastructure/docker/compose.dev.yml).
 # It is never used in staging or production.
 _LOCAL_DEV_DATABASE_URL = "postgresql+psycopg://mediavault:mediavault@localhost:5432/mediavault"
+# Publicly known, development/test only. Staging/production refuse it (see validator below).
+_DEV_ONLY_JWT_SECRET = "dev-only-insecure-jwt-secret-not-for-deployment"  # noqa: S105
+MIN_JWT_SECRET_LENGTH = 32
+# Rejects obviously non-random secrets such as 32 x "a".
+MIN_JWT_SECRET_DISTINCT_CHARS = 10
 
 
 class ConfigurationError(RuntimeError):
@@ -59,7 +65,9 @@ class Settings(BaseSettings):
 
     app_name: str = "mediavault-api"
     app_version: str = "0.1.0"
-    environment: Environment = "development"
+    # REQUIRED (MV-018): there is no default. An unset ENVIRONMENT refuses to start instead of
+    # silently picking development defaults (dev JWT secret, local database credentials).
+    environment: Environment | None = None
     log_level: str = "INFO"
 
     # Format: postgresql+psycopg://USER:PASSWORD@HOST:PORT/DBNAME
@@ -67,10 +75,32 @@ class Settings(BaseSettings):
     database_url: str | None = None
     database_connect_timeout_s: int = 3
 
+    # --- Auth (Phase 2 step 1) ---
+    # HS256 signing key for access tokens. Required in staging/production (>= 32 chars).
+    jwt_secret: str | None = None
+    access_token_ttl_s: int = 15 * 60
+    refresh_token_ttl_s: int = 30 * 24 * 60 * 60
+    # Concurrency grace for refresh rotation: re-presenting the token that was JUST rotated, within
+    # this many seconds, returns the same successor instead of revoking the session (two tabs or
+    # overlapping app requests). Bounded to 0..60 s; 0 disables the grace (strict single use).
+    refresh_reuse_grace_s: Annotated[int, Field(ge=0, le=60)] = 10
+    # In-memory, per-process fixed-window limits for /auth/login and /auth/register.
+    auth_rate_limit_per_ip: int = 20
+    auth_rate_limit_per_email: int = 5
+    auth_rate_limit_window_s: int = 60
+    # Peers (e.g. the website's server) allowed to pass the real client IP in X-Forwarded-For.
+    # Comma-separated exact IPs. Empty = never trust X-Forwarded-For.
+    # Comma-separated exact IPs or CIDRs. Only these peers may name the client IP, via
+    # X-MediaVault-Client-IP (set by the website server) or X-Forwarded-For. Empty = trust nobody.
+    auth_trusted_proxies: Annotated[list[str], NoDecode] = []
+    # Failed /auth/refresh and unmatched /auth/logout attempts per client IP per window (MV-021).
+    # Only failures count, so normal refreshes never hit it.
+    auth_rate_limit_refresh_failures_per_ip: int = 30
+
     # Comma-separated exact origins allowed to call the API from a browser.
     cors_allow_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
 
-    @field_validator("cors_allow_origins", mode="before")
+    @field_validator("cors_allow_origins", "auth_trusted_proxies", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:
         if isinstance(value, str):
@@ -81,6 +111,11 @@ class Settings(BaseSettings):
     def _check_deployed_environment(self) -> "Settings":
         # ConfigurationError is not a ValueError, so pydantic re-raises it unchanged (no input
         # values attached).
+        if self.environment is None:
+            raise ConfigurationError(
+                "ENVIRONMENT must be set explicitly (development, test, staging or production); "
+                "nothing is assumed when it is unset."
+            )
         if self.environment in DEPLOYED_ENVIRONMENTS:
             if not (self.database_url and self.database_url.strip()):
                 raise ConfigurationError(
@@ -94,13 +129,42 @@ class Settings(BaseSettings):
                     f"{len(bad)} origin(s) are not explicit https:// origins "
                     "('*', wildcards, http://, paths and credentials are rejected)."
                 )
-        elif not self.database_url:
-            self.database_url = _LOCAL_DEV_DATABASE_URL
+            secret = (self.jwt_secret or "").strip()
+            if not secret or secret == _DEV_ONLY_JWT_SECRET:
+                raise ConfigurationError(
+                    f"JWT_SECRET must be set when ENVIRONMENT={self.environment}; "
+                    "the development default is not accepted."
+                )
+            if len(secret) < MIN_JWT_SECRET_LENGTH:
+                raise ConfigurationError(
+                    f"JWT_SECRET is too short for ENVIRONMENT={self.environment}: "
+                    f"at least {MIN_JWT_SECRET_LENGTH} characters are required."
+                )
+            if len(set(secret)) < MIN_JWT_SECRET_DISTINCT_CHARS:
+                raise ConfigurationError(
+                    f"JWT_SECRET is too weak for ENVIRONMENT={self.environment}: use a random "
+                    "value (e.g. python -c 'import secrets; print(secrets.token_urlsafe(48))')."
+                )
+        else:
+            if not self.database_url:
+                self.database_url = _LOCAL_DEV_DATABASE_URL
+            if not self.jwt_secret:
+                self.jwt_secret = _DEV_ONLY_JWT_SECRET
         return self
+
+    @property
+    def environment_name(self) -> str:
+        assert self.environment is not None
+        return self.environment
 
     @property
     def is_deployed(self) -> bool:
         return self.environment in DEPLOYED_ENVIRONMENTS
+
+    @property
+    def resolved_jwt_secret(self) -> str:
+        assert self.jwt_secret is not None
+        return self.jwt_secret
 
     @property
     def resolved_database_url(self) -> str:

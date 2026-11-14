@@ -31,8 +31,11 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
               <Logo />
               MediaVault
             </Link>
-            <Link href="/" aria-current="page" className="text-sm text-blue-200 hover:text-white">
+            <Link href="/" className="text-sm text-blue-200 hover:text-white">
               Home
+            </Link>
+            <Link href="/account" className="ml-auto text-sm text-blue-200 hover:text-white">
+              Account
             </Link>
           </nav>
         </header>

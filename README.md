@@ -71,7 +71,7 @@ cd backend
 uv python install 3.13
 uv sync
 uv run alembic upgrade head
-uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn app.main:app --reload --no-proxy-headers --host 0.0.0.0 --port 8000
 ```
 
 Check it in a browser or a second terminal:
@@ -89,6 +89,31 @@ Expected (HTTP 200):
 If the database is down, you get HTTP 503 with `"status":"degraded"` and `"database":"error"`.
 The interactive API docs are at http://localhost:8000/docs.
 
+**Accounts (Phase 2 step 1).** `uv run alembic upgrade head` also creates the `users`,
+`auth_sessions`, `refresh_tokens` and `media_items` (ownership stub, no files) tables. Try it:
+
+```bash
+curl -X POST localhost:8000/api/v1/auth/register -H 'content-type: application/json' \
+  -d '{"email":"you@example.com","password":"at-least-12-characters"}'     # 202
+curl -X POST localhost:8000/api/v1/auth/login -H 'content-type: application/json' \
+  -d '{"email":"you@example.com","password":"at-least-12-characters"}'     # access + refresh token
+curl localhost:8000/api/v1/auth/me -H "authorization: Bearer <access_token>"
+```
+
+| Endpoint | What it does |
+| --- | --- |
+| `POST /api/v1/auth/register` | Always `202` with the same message (no account enumeration). Password 12 to 128 characters |
+| `POST /api/v1/auth/login` | `200` with a 15-minute access JWT and a 30-day single-use refresh token, or a generic `401` |
+| `POST /api/v1/auth/refresh` | Rotates the refresh token. Re-using an old refresh token revokes that whole session, except overlapping refreshes of the token rotated in the last `REFRESH_REUSE_GRACE_S` seconds (default 10), which get the same successor |
+| `POST /api/v1/auth/logout` | Revokes the session (refresh token in the body and/or the bearer token). Always `204` |
+| `GET /api/v1/auth/me` | The signed-in user |
+| `/api/v1/media-items` | **Stub** (title only, no upload) used to prove per-user ownership: other users' rows are `404` |
+
+Login and register are rate-limited per client IP and per email (defaults: 20 and 5 attempts per
+60 s, `429` with `Retry-After`). The limiter is **in memory, per process**: with several API
+processes the effective limit multiplies, and it resets on restart. A shared Redis limiter is
+planned before running more than one process.
+
 ### Terminal 2: website
 
 ```bash
@@ -100,7 +125,10 @@ cp .env.example .env.local       # Windows PowerShell: Copy-Item .env.example .e
 pnpm dev
 ```
 
-Open http://localhost:3000. The card should say **Backend connected**.
+Open http://localhost:3000. The card should say **Backend connected**. **Account** in the header
+opens sign-in/register. The browser never sees tokens: the website's own `/api/auth/*` routes call
+the API server-side (`API_INTERNAL_BASE_URL`, falling back to `NEXT_PUBLIC_API_BASE_URL`) and keep
+the tokens in `HttpOnly`, `SameSite=Strict` cookies (`Secure` in production).
 
 ### Terminal 3: Android app (emulator running)
 
@@ -139,7 +167,7 @@ cd backend && uv run ruff check . && uv run pytest -v
 # a bare `pnpm exec tsc --noEmit` also works on a fresh clone.
 cd web && pnpm lint && pnpm typecheck && pnpm test && pnpm build
 
-# Android (JVM unit tests + lint; the UI tests need a running emulator)
+# Android (JVM unit tests + lint; the UI tests and the encrypted token store test need an emulator)
 cd android && ./gradlew assembleDebug testDebugUnitTest lintDebug
 cd android && ./gradlew connectedDebugAndroidTest
 # Optional: unit-test the app's network stack against your running backend
@@ -160,12 +188,52 @@ cd android && ./gradlew assembleRelease -Pmediavault.releaseApiBaseUrl=https://a
 
 ## Deployed environments (staging / production)
 
+`ENVIRONMENT` is required (`development`, `test`, `staging` or `production`). If it is unset the
+backend refuses to start instead of quietly using development defaults; `.env.example` sets
+`ENVIRONMENT=development` for local work.
+
 The backend refuses to start (`ConfigurationError`, no values echoed) when `ENVIRONMENT` is
 `staging` or `production` and:
 
 * `DATABASE_URL` is missing or empty. There is no built-in database default outside development/test.
 * `CORS_ALLOW_ORIGINS` contains `*`, a wildcard, an `http://` origin, a path, a query or credentials.
   Only explicit `https://host[:port]` origins are accepted.
+* `JWT_SECRET` is missing, equals the development default, is shorter than 32 characters or is
+  obviously not random (fewer than 10 different characters).
+  Generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"` and keep it in
+  the environment's secret store. Rotating it invalidates all access tokens.
+
+Other auth settings (env): `ACCESS_TOKEN_TTL_S` (900), `REFRESH_TOKEN_TTL_S` (2592000),
+`REFRESH_REUSE_GRACE_S` (10, allowed 0 to 60; 0 = strict single use),
+`AUTH_RATE_LIMIT_PER_IP` (20), `AUTH_RATE_LIMIT_PER_EMAIL` (5), `AUTH_RATE_LIMIT_WINDOW_S` (60),
+`AUTH_RATE_LIMIT_REFRESH_FAILURES_PER_IP` (30: failed refreshes and logouts that name no session.
+The token is checked first, so a valid refresh or a logout of a real session is never limited;
+past the limit only invalid attempts get 429) and `AUTH_TRUSTED_PROXIES`.
+
+Clients treat only a 401 (or 422) on refresh as "signed out". 429, 5xx and network errors keep the
+tokens and show a retryable error, on the website and in the Android app.
+
+### Client IP and rate limiting
+
+* Run uvicorn with `--no-proxy-headers` (as above). The app, not uvicorn, decides whom to believe.
+* `AUTH_TRUSTED_PROXIES` (comma-separated IPs/CIDRs, empty by default) lists the peers allowed to
+  name the client IP: normally just the website server. They may send `X-MediaVault-Client-IP`
+  (preferred) or `X-Forwarded-For`. Requests from any other peer are rate-limited on the socket
+  address; if they carry `X-Forwarded-For` or `X-MediaVault-Client-IP` anyway, they all share one
+  bucket, so rotating fake addresses gains nothing.
+* The website server never forwards the browser's `X-Forwarded-For` (the browser controls it). It
+  sets `X-MediaVault-Client-IP` only when `WEB_TRUSTED_PROXY_HOPS` says how many reverse proxies
+  in front of it append the client address (e.g. `1` for one nginx with
+  `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`).
+* **Default `WEB_TRUSTED_PROXY_HOPS=0` means ALL website users share ONE login/register bucket**
+  (20 attempts per minute for the whole site, per API process). Fine for local development; not
+  for production. In production the website logs a warning at startup when it is 0, and the API
+  logs `auth.no_trusted_proxies` when `AUTH_TRUSTED_PROXIES` is empty.
+* **Recommended production setting:** website behind one reverse proxy that appends the client
+  address, `WEB_TRUSTED_PROXY_HOPS=1` on the website, `AUTH_TRUSTED_PROXIES=<website server IP>`
+  on the API. See [DEPLOY.md](DEPLOY.md).
+
+On the website server set `API_INTERNAL_BASE_URL` to the API's internal address.
 
 In production `/docs`, `/redoc` and `/openapi.json` are not served.
 
