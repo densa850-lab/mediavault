@@ -3,6 +3,8 @@ package app.densa.mediavault.data.auth
 import app.densa.mediavault.data.remote.NetworkModule
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -33,6 +35,15 @@ interface AuthRepository {
 
 class NetworkAuthRepository(private val api: AuthApi, private val store: TokenStore) : AuthRepository {
 
+    /**
+     * Serialises every change to the stored tokens (refresh, login, logout). Overlapping
+     * currentSession() calls therefore share ONE refresh: the first caller rotates the token and
+     * the others, after waiting, see that the stored pair already changed and reuse it instead of
+     * presenting the old (now used) refresh token again. Logout waits for an in-flight refresh, so
+     * it revokes and clears the newest pair and a late refresh can never resurrect stale tokens.
+     */
+    private val tokenLock = Mutex()
+
     override suspend fun register(email: String, password: String): AuthOutcome {
         if (password.length < MIN_PASSWORD_LENGTH) {
             return AuthOutcome.Failure("Password must be at least $MIN_PASSWORD_LENGTH characters.")
@@ -47,7 +58,7 @@ class NetworkAuthRepository(private val api: AuthApi, private val store: TokenSt
         val res = api.login(CredentialsDto(email.trim(), password))
         val body = res.body()
         if (res.isSuccessful && body != null) {
-            store.save(StoredTokens(body.accessToken, body.refreshToken))
+            tokenLock.withLock { store.save(StoredTokens(body.accessToken, body.refreshToken)) }
             AuthOutcome.Success
         } else {
             failure(res, INVALID_CREDENTIALS)
@@ -74,18 +85,26 @@ class NetworkAuthRepository(private val api: AuthApi, private val store: TokenSt
         }
     }
 
-    private suspend fun refreshAndRetry(tokens: StoredTokens): SessionState {
-        val rotated = api.refresh(RefreshDto(tokens.refreshToken))
+    private suspend fun refreshAndRetry(stale: StoredTokens): SessionState = tokenLock.withLock {
+        val current = store.read() ?: return@withLock SessionState.SignedOut
+        if (current != stale) {
+            // Another caller already refreshed (or signed in again) while we waited: use its pair.
+            val me = api.me(bearer(current.accessToken))
+            val user = me.body()
+            if (me.isSuccessful && user != null) return@withLock SessionState.SignedIn(user)
+            if (me.code() != 401) return@withLock SessionState.Unavailable("Server error (HTTP ${me.code()}).")
+        }
+        val rotated = api.refresh(RefreshDto(current.refreshToken))
         val pair = rotated.body()
         if (!rotated.isSuccessful || pair == null) {
             // Expired, revoked or reused refresh token: the session is over.
             store.clear()
-            return SessionState.SignedOut
+            return@withLock SessionState.SignedOut
         }
         store.save(StoredTokens(pair.accessToken, pair.refreshToken))
         val me = api.me(bearer(pair.accessToken))
         val user = me.body()
-        return if (me.isSuccessful && user != null) {
+        if (me.isSuccessful && user != null) {
             SessionState.SignedIn(user)
         } else {
             store.clear()
@@ -95,15 +114,17 @@ class NetworkAuthRepository(private val api: AuthApi, private val store: TokenSt
 
     /** Revokes the session on the server (best effort) and always forgets the tokens locally. */
     override suspend fun logout() {
-        val tokens = store.read()
-        try {
-            if (tokens != null) api.logout(bearer(tokens.accessToken), LogoutDto(tokens.refreshToken))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            // Server unreachable: local sign-out still happens.
-        } finally {
-            store.clear()
+        tokenLock.withLock {
+            val tokens = store.read()
+            try {
+                if (tokens != null) api.logout(bearer(tokens.accessToken), LogoutDto(tokens.refreshToken))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Server unreachable: local sign-out still happens.
+            } finally {
+                store.clear()
+            }
         }
     }
 

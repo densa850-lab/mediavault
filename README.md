@@ -104,7 +104,7 @@ curl localhost:8000/api/v1/auth/me -H "authorization: Bearer <access_token>"
 | --- | --- |
 | `POST /api/v1/auth/register` | Always `202` with the same message (no account enumeration). Password 12 to 128 characters |
 | `POST /api/v1/auth/login` | `200` with a 15-minute access JWT and a 30-day single-use refresh token, or a generic `401` |
-| `POST /api/v1/auth/refresh` | Rotates the refresh token. Re-using an old refresh token revokes that whole session |
+| `POST /api/v1/auth/refresh` | Rotates the refresh token. Re-using an old refresh token revokes that whole session, except overlapping refreshes of the token rotated in the last `REFRESH_REUSE_GRACE_S` seconds (default 10), which get the same successor |
 | `POST /api/v1/auth/logout` | Revokes the session (refresh token in the body and/or the bearer token). Always `204` |
 | `GET /api/v1/auth/me` | The signed-in user |
 | `/api/v1/media-items` | **Stub** (title only, no upload) used to prove per-user ownership: other users' rows are `404` |
@@ -199,6 +199,7 @@ The backend refuses to start (`ConfigurationError`, no values echoed) when `ENVI
   the environment's secret store. Rotating it invalidates all access tokens.
 
 Other auth settings (env): `ACCESS_TOKEN_TTL_S` (900), `REFRESH_TOKEN_TTL_S` (2592000),
+`REFRESH_REUSE_GRACE_S` (10, allowed 0 to 60; 0 = strict single use),
 `AUTH_RATE_LIMIT_PER_IP` (20), `AUTH_RATE_LIMIT_PER_EMAIL` (5), `AUTH_RATE_LIMIT_WINDOW_S` (60) and
 `AUTH_TRUSTED_PROXIES` (comma-separated IPs/CIDRs, for example the website server; only these peers
 may set `X-Forwarded-For`, otherwise the socket address is used for rate limiting).

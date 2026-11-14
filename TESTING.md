@@ -51,6 +51,11 @@ What the auth tests cover:
   associated data), `AuthViewModel`, Compose `AuthScreen` (masked password, 12-char check, errors,
   sign out) and `EncryptedTokenStore` on a device (no plaintext token in the app's data directory).
 
+Concurrent refresh (fix): truly concurrent refreshes on separate PostgreSQL connections (2 with a held
+session lock, and 8) keep the session and return one successor; replay after the grace revokes; other
+sessions unaffected; website overlapping `/api/auth/me` share one refresh with identical cookies;
+Android overlapping `currentSession()` share one refresh, logout waits and leaves no credentials.
+
 Still not verified: the R8-minified release build was built but not run on a device, so Tink under
 R8 relies on its bundled keep rules; the in-memory rate limiter is per process.
 

@@ -6,6 +6,8 @@
  * origin (Secure in production). Every state-changing request must come from our own origin
  * (Origin header check), which together with SameSite=Strict blocks CSRF.
  */
+import { createHash } from "node:crypto";
+
 import { apiBaseUrl } from "@/lib/env";
 
 export const ACCESS_COOKIE = "mv_access";
@@ -193,7 +195,52 @@ export async function handleLogout(req: Request, fetchImpl: Fetch = fetch): Prom
   return json(null, 204, clearCookies());
 }
 
-/** Current user. Transparently rotates the refresh token when the access token has expired. */
+type RefreshResult =
+  | { kind: "ok"; tokens: TokenResponse }
+  | { kind: "rejected" }
+  | { kind: "unreachable" };
+
+/**
+ * Single-flight refresh, per server process: overlapping requests that carry the SAME refresh
+ * cookie share one upstream /auth/refresh call and therefore receive byte-identical Set-Cookie
+ * headers, so neither response can overwrite the other with an older pair. Entries live only while
+ * the call is in flight (no tokens are retained afterwards). Across several website processes the
+ * API's bounded concurrency grace returns the same successor refresh token instead.
+ */
+const inflightRefresh = new Map<string, Promise<RefreshResult>>();
+
+function refreshKey(refresh: string): string {
+  return createHash("sha256").update(refresh).digest("hex");
+}
+
+/** Visible for tests: how many refreshes are currently in flight. */
+export function inflightRefreshCount(): number {
+  return inflightRefresh.size;
+}
+
+function refreshOnce(req: Request, refresh: string, fetchImpl: Fetch): Promise<RefreshResult> {
+  const key = refreshKey(refresh);
+  const existing = inflightRefresh.get(key);
+  if (existing) return existing;
+  const flight = (async (): Promise<RefreshResult> => {
+    const rotated = await callApi(fetchImpl, "/auth/refresh", {
+      method: "POST",
+      headers: forwardHeaders(req),
+      body: JSON.stringify({ refresh_token: refresh }),
+    });
+    if (!rotated) return { kind: "unreachable" };
+    if (rotated.status !== 200) return { kind: "rejected" };
+    return { kind: "ok", tokens: rotated.body as TokenResponse };
+  })().finally(() => inflightRefresh.delete(key));
+  inflightRefresh.set(key, flight);
+  return flight;
+}
+
+/**
+ * Current user. Transparently rotates the refresh token when the access token has expired.
+ * Cookies are only written when a refresh actually happened; a request whose access cookie is
+ * still valid never emits Set-Cookie, so a slow plain request cannot replace a newer pair.
+ */
 export async function handleMe(req: Request, fetchImpl: Fetch = fetch): Promise<Response> {
   const access = readCookie(req, ACCESS_COOKIE);
   const refresh = readCookie(req, REFRESH_COOKIE);
@@ -206,14 +253,12 @@ export async function handleMe(req: Request, fetchImpl: Fetch = fetch): Promise<
     if (me.status === 200) return json(me.body, 200);
   }
   if (!refresh) return json({ detail: "Not signed in." }, 401, access ? clearCookies() : []);
-  const rotated = await callApi(fetchImpl, "/auth/refresh", {
-    method: "POST",
-    headers: forwardHeaders(req),
-    body: JSON.stringify({ refresh_token: refresh }),
-  });
-  if (!rotated) return json(UNREACHABLE, 502);
-  if (rotated.status !== 200) return json({ detail: "Not signed in." }, 401, clearCookies());
-  const tokens = rotated.body as TokenResponse;
+  const result = await refreshOnce(req, refresh, fetchImpl);
+  if (result.kind === "unreachable") return json(UNREACHABLE, 502);
+  // Rejected = expired, logged out, or replayed outside the API's concurrency grace (which
+  // revokes the session server-side), so there is no newer valid pair left to protect.
+  if (result.kind === "rejected") return json({ detail: "Not signed in." }, 401, clearCookies());
+  const tokens = result.tokens;
   const me = await callApi(fetchImpl, "/auth/me", {
     method: "GET",
     headers: forwardHeaders(req, { Authorization: `Bearer ${tokens.access_token}` }),

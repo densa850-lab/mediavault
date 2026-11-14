@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, LargeBinary, String, func
 from sqlalchemy.dialects.postgresql import CITEXT, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -61,5 +61,13 @@ class RefreshToken(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    # Set when the token is exchanged. Presenting it again is reuse -> session revoked.
+    # Set when the token is exchanged. Presenting it again is reuse -> session revoked, except for
+    # the short concurrency grace (see app.auth.service.rotate).
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The token this one was exchanged for (same session).
+    replaced_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("refresh_tokens.id", ondelete="SET NULL")
+    )
+    # Random server-side nonce from which (together with THIS token's raw value, never stored) the
+    # successor can be re-derived during the grace window. Cleared once the successor is used.
+    successor_nonce: Mapped[bytes | None] = mapped_column(LargeBinary(32))

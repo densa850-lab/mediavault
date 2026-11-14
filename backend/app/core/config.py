@@ -14,7 +14,7 @@ from functools import lru_cache
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 Environment = Literal["development", "test", "staging", "production"]
@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     jwt_secret: str | None = None
     access_token_ttl_s: int = 15 * 60
     refresh_token_ttl_s: int = 30 * 24 * 60 * 60
+    # Concurrency grace for refresh rotation: re-presenting the token that was JUST rotated, within
+    # this many seconds, returns the same successor instead of revoking the session (two tabs or
+    # overlapping app requests). Bounded to 0..60 s; 0 disables the grace (strict single use).
+    refresh_reuse_grace_s: Annotated[int, Field(ge=0, le=60)] = 10
     # In-memory, per-process fixed-window limits for /auth/login and /auth/register.
     auth_rate_limit_per_ip: int = 20
     auth_rate_limit_per_email: int = 5

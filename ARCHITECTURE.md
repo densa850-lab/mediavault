@@ -47,6 +47,39 @@ flowchart LR
 | Web | Backend-for-frontend: `src/app/api/auth/*` route handlers call the API server-side and store tokens only in `HttpOnly; SameSite=Strict; Secure` cookies (`mv_refresh` scoped to `/api/auth`). State-changing routes require a same-origin `Origin` header |
 | Android | `NetworkAuthRepository` + `EncryptedTokenStore`: DataStore holding Tink AES-256-GCM ciphertext; the Tink keyset is wrapped by an Android Keystore key. Backups are disabled. (EncryptedSharedPreferences is deprecated, so it isn't used) |
 
+### Concurrent refresh (fix for PR #2 review)
+
+Two tabs or overlapping app requests can present the same refresh token at the same moment.
+Strict single use would treat the second one as theft and log the user out. The protocol:
+
+1. **Server (bounded idempotent rotation).** All rotations of one session are serialised by a
+   `SELECT ... FOR UPDATE` on the session row (lock order: session, then token rows). When token
+   T is rotated, its successor S is *derived*: `S = HMAC-SHA256(key = T, msg = nonce || session id
+   || successor id)`, where `nonce` is 256 random bits stored on T's row. The database stores only
+   `sha256(T)`, `sha256(S)`, the nonce and the link T to S, never a raw refresh token. Re-presenting
+   T returns the same S (and a fresh access token for the same session) only if **all** hold: T was
+   rotated at most `REFRESH_REUSE_GRACE_S` seconds ago (default 10, max 60, 0 disables), S is T's
+   direct successor in the same session, S is unused and unexpired, the session is active, and
+   `sha256(derived S)` equals the stored hash. Otherwise it is a replay and the session is revoked
+   as before. When S is used, T's nonce is deleted, so S can no longer be re-derived by anyone.
+2. **Website.** The `/api/auth/me` handler single-flights refreshes per refresh cookie inside each
+   server process (overlapping requests share one upstream call and get byte-identical
+   `Set-Cookie` headers); requests that didn't refresh never set cookies; the browser client
+   dedupes concurrent `fetchCurrentUser` calls. Across processes the server grace yields the same
+   successor refresh token.
+3. **Android.** `NetworkAuthRepository` serialises refresh, login-save and logout with a `Mutex`.
+   A caller that waited re-reads the store and reuses the newer pair instead of presenting the old
+   token; logout waits for an in-flight refresh and revokes the newest pair; a rejected refresh
+   clears the credentials.
+
+Threat model and trade-off: an attacker who steals T and presents it within the grace window,
+before the legitimate client uses S, receives the same S as the client (not a separate branch).
+That is no worse than stealing T a moment earlier, which strict rotation also cannot stop. As soon
+as the two parties diverge (one uses S, the other presents T or S later than the grace allows),
+reuse detection revokes the session. A database-only attacker learns nothing usable: without the
+raw T, the nonce cannot produce S, and stored hashes cannot be reversed. Grace never extends
+expiry, never applies across sessions, and never reaches beyond the direct successor.
+
 ## Key decisions
 
 * **Retrofit 3.0.0 with OkHttp 5.5.1.** Retrofit 3.0.0's POM declares OkHttp 4.12.0. Gradle resolves it

@@ -50,12 +50,25 @@ export async function submitAuth(
   return { ok: false, message: messageFrom(body, mode === "login" ? "Sign-in failed." : "Registration failed.") };
 }
 
-export async function fetchCurrentUser(fetchImpl: typeof fetch = fetch): Promise<CurrentUser | null> {
-  const res = await fetchImpl("/api/auth/me", { credentials: "same-origin", cache: "no-store" });
-  if (res.status === 401) return null;
-  if (!res.ok) throw new Error("The MediaVault server could not be reached.");
-  const body = (await res.json()) as CurrentUser;
-  return { id: body.id, email: body.email };
+let currentUserFlight: Promise<CurrentUser | null> | null = null;
+
+/**
+ * Who is signed in. Concurrent callers in the same page share one request, so the browser never
+ * sends two overlapping /api/auth/me calls that could both refresh.
+ */
+export function fetchCurrentUser(fetchImpl: typeof fetch = fetch): Promise<CurrentUser | null> {
+  if (currentUserFlight) return currentUserFlight;
+  const flight = (async () => {
+    const res = await fetchImpl("/api/auth/me", { credentials: "same-origin", cache: "no-store" });
+    if (res.status === 401) return null;
+    if (!res.ok) throw new Error("The MediaVault server could not be reached.");
+    const body = (await res.json()) as CurrentUser;
+    return { id: body.id, email: body.email };
+  })().finally(() => {
+    currentUserFlight = null;
+  });
+  currentUserFlight = flight;
+  return flight;
 }
 
 export async function signOut(fetchImpl: typeof fetch = fetch): Promise<void> {
